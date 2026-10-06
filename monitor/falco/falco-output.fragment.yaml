@@ -1,0 +1,9 @@
+# Merge these settings into the reviewed Falco host configuration. Falco does
+# not rotate this file; configure logrotate on the Linux host.
+json_output: true
+
+file_output:
+  enabled: true
+  keep_alive: false
+  filename: /var/log/falco/oma-events.jsonl
+
