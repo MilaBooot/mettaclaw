@@ -182,7 +182,7 @@ to `/events/oma-events.jsonl`. `OMA_MONITOR_DOCKER_NAME` selects its own contain
 name; `OMA_FALCO_CONTAINER` selects the sensor container name. If Oma's name
 changes, also update `oma_target_container` in `falco/oma_rules.yaml`.
 
-## Authorization and limits
+## Authorization
 
 All page/API routes require independent HTTP Basic authentication. Lifecycle
 requests also require POST JSON, a CSRF header, browser confirmation, and serialized
@@ -193,14 +193,25 @@ to the configured container. Streams recover after stops, Docker failures, and
 container/event-file replacement.
 
 Docker socket access gives the monitor privileged host control. Restrict its
-operator account and keep it on localhost, through SSH, or behind HTTPS. There is
-one operator role; production identity controls and durable audit retention are
-deferred. Credentials are stored in container environment configuration by Docker,
+operator account and keep it on localhost, through SSH, or behind HTTPS.
+Credentials are stored in container environment configuration by Docker,
 not in the repository or browser storage. Do not use `bash -x` when entering secrets.
 
-“Running” reports Docker process state, not agent health. A readable event file
-also does not prove the sensor is currently capturing. Falco output requires host
-rotation/retention configuration; the monitor does not rotate or archive it.
+## Major limitations and improvements
+
+- **Detection tuning:** Falco signals describe attempts, not confirmed breaches.
+  Outbound rules include normal traffic; production use needs reviewed allowlists
+  and false-positive tuning. Automatic containment is not implemented.
+- **Operator access:** One operator account is supported. Production identity
+  controls and multiple operator roles remain future work.
+- **Retention:** Browser history is bounded; durable audit/event storage and
+  host-side Falco file rotation must be configured separately.
+- **Health visibility:** Docker “running” does not establish agent health, and a
+  readable event file does not establish sensor health. Explicit health checks
+  remain future work.
+
+Detailed test coverage and verification caveats are recorded in [TESTING.md](TESTING.md)
+and [HANDOFF.md](HANDOFF.md).
 
 ## Validation
 
