@@ -120,6 +120,18 @@ The raw file contains the harmless demonstration token. This helper does not
 execute the Docker-socket indicator; its native capture requires a separate,
 explicitly approved check.
 
+The separately authorized socket check passed on 2026-10-07. It reused the
+existing sensor, temporarily included a unique disposable container name in
+the target macro, and restored the original rules afterward. The target used
+`--rm`, `--read-only`, `--network none`, `--cap-drop ALL`, user `65534:65534`,
+and only a writable `/run` tmpfs. It created/opened an empty regular file at
+`/var/run/docker.sock` (resolved to `/run/docker.sock`); it had no host bind
+mounts or privileged access. Two Critical alerts matched its actual container
+ID and `source: syscall`. The container was removed. This validates the same
+socket-path condition with an adapted target selector; it does not test the
+live Oma identity, monitor display, Docker daemon control, or escape. See
+[validation/docker-socket-2026-10-07.json](validation/docker-socket-2026-10-07.json).
+
 Normal provider/Telegram connections trigger outbound Notices too. High counts
 are expected with the current alert-all prototype. Profile and review allowlists;
 do not automate containment based on these rules. Keep production sensor tuning,

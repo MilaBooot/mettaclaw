@@ -349,6 +349,36 @@ Executed on Windows with Python 3.11.9:
   Manual browser rendering, successful escape, and production event-loss rates
   are not claimed. Publication result will be reported after remote verification.
 
+### Authorized disposable Docker-socket check — 2026-10-07
+
+- The operator reported pushing the previous commit and then explicitly
+  authorized the remaining rule test under restrictive disposable-container
+  constraints. That authorization supersedes the earlier socket-test skip.
+- Reused the existing approved `oma-falco-live` sensor; no new privileged sensor
+  was launched. Temporarily extended only the target macro to include
+  `oma-fake-socket-check-1791385628` alongside `omega`, preserving the socket
+  condition and all existing rules. Reloaded the sensor with SIGHUP, then
+  restored/reloaded the byte-identical original rules during cleanup.
+- The target was `--rm`, read-only, network none, all capabilities dropped,
+  no-new-privileges, UID/GID `65534:65534`, with only a writable `/run` tmpfs.
+  Docker inspection confirmed no bind mounts and privileged=false. No host
+  socket, host filesystem, tracing, proc, or etc mounts were added to the target.
+  No sudo, host-root command, or root exec on another container was used.
+- Python created/opened an empty regular file at `/var/run/docker.sock`, which
+  resolves to `/run/docker.sock` in the image. Falco produced two **Critical**
+  `Oma attempts Docker socket access` alerts at `2026-10-07T15:07:14.738Z`,
+  with `source: syscall` and ID `376f090f6238`, matching the disposable target.
+- Cleanup verified target removal, exact rule-file restoration (SHA-256
+  `babac900bab930fe537044c6b96497be93630f30d15c7cc58eac67af7b8a6b5f`), and
+  successful modern BPF sensor reload. Existing Oma and monitor were unchanged.
+- Evidence: [`validation/docker-socket-2026-10-07.json`](validation/docker-socket-2026-10-07.json).
+  This tests the socket pathname condition with a temporarily adapted target
+  selector, not Docker daemon access, successful escape, or live monitor display
+  (the monitor correctly selects `omega`, not the disposable target).
+- Updated README/TESTING to replace the current unverified-rule claim with this
+  scoped result. Historical skip records remain intact. No follow-up commit,
+  push, PR, or deployment was performed for this test.
+
 ## Next milestone
 
 Review the lifecycle controls and tune the Falco prototype on a staging Linux

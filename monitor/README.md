@@ -157,11 +157,14 @@ See [falco/README.md](falco/README.md) for the sensor integration contract.
 The Docker-socket rule detects Oma opening `/var/run/docker.sock` or
 `/run/docker.sock`. Access to a real Docker daemon socket can allow control of
 other containers and the host, so this is a critical indicator. The native test
-for this rule was skipped by operator choice; the rule remains enabled but its
-real capture is unverified. The proposed test would open an empty regular file
-at that path inside the test container, without mounting the real host socket.
-It would test the pathname-based rule, not prove a successful escape. Never mount
-the host Docker socket into Oma just to generate this indicator.
+initially skipped this rule; a subsequently authorized disposable-container test
+produced Critical syscall alerts by creating/opening an empty regular file at
+that path inside `/run` tmpfs. It used `--rm`, user `nobody`, no host mounts,
+no network, and no privileged access. The existing sensor's target macro briefly
+included the disposable name, then was restored. This validates pathname-based
+detection, not access to a Docker daemon or a successful escape. Evidence is in
+[validation/docker-socket-2026-10-07.json](validation/docker-socket-2026-10-07.json).
+Never mount the host Docker socket into Oma just to generate this indicator.
 
 ## Configuration
 
