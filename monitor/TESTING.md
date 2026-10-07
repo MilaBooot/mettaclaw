@@ -1,215 +1,126 @@
-# End-to-end testing
+# Monitor validation
 
-This guide separates three claims that must not be confused:
+Keep three claims separate: Docker status/logs/controls, Falco JSON display, and
+real kernel syscall capture. Mock JSON validates the reader/UI contract; only a
+sensor on Oma's native Linux kernel validates capture. No test establishes that
+a signal represents a successful breach or escape.
 
-1. the monitor can authenticate, show real Oma Docker logs, and control Oma;
-2. Falco rules can parse and the monitor can display Falco JSON;
-3. Falco actually observes kernel syscalls from Oma.
+## Regression checks
 
-The automated suite covers the first two with mocks. A real Docker integration
-covers status, logs, Start, Stop, and Restart. Claim 3 requires Falco and Oma to
-run on the same native Linux kernel.
-
-## A. Current-source Oma without external credentials
-
-Use three WSL terminals. Do not supply Telegram or model-provider secrets. A
-private Docker network gives the mock services stable DNS and avoids
-`host.docker.internal`/WSL routing differences.
-
-Terminal 1 - build the exact checkout, create the private network, and run the
-repository's deterministic mock LLM/channel services:
+From the repository root, in an isolated Python environment with
+`monitor/requirements-dev.txt` installed:
 
 ```bash
-cd /mnt/d/HyperClaw/Omega
+python -m pytest monitor/tests -q
+```
+
+The real Docker and combined acceptance tests are skipped unless explicitly
+configured. They stop/start/restart their target, so use a disposable container.
+Do not point them at a live Telegram/provider bot.
+
+## Current-source Oma with mock services
+
+Build the current checkout. Check that the following dedicated test names are
+unused before creating them; do not remove an existing container to make room.
+No Telegram or model-provider credentials are supplied.
+
+```bash
 docker build -t omega:monitor-test .
-docker network create oma-monitor-test-net
-docker run --rm --name omega-mocks \
-  --network oma-monitor-test-net \
+docker network create oma-monitor-acceptance-net
+docker run -d --name oma-monitor-mocks \
+  --network oma-monitor-acceptance-net --user 65534:65534 \
   --entrypoint python3 \
-  -v /mnt/d/HyperClaw/Omega:/workspace:ro \
-  -w /workspace \
-  omega:monitor-test monitor/tests/omega_mock_services.py
+  --mount "type=bind,src=$PWD,dst=/workspace,readonly" \
+  -w /workspace omega:monitor-test monitor/tests/omega_mock_services.py
 ```
 
-Wait for `Omega mock services ready: LLM=9765 channel=9766`.
-
-Terminal 2 - create the disposable local Oma instance. This command removes
-only an existing container named exactly `omega`; confirm it is disposable
-first. It does not use `scripts/omega start`, which also recreates the target.
+Wait for `Omega mock services ready: LLM=9765 channel=9766` in its logs. Then:
 
 ```bash
-cd /mnt/d/HyperClaw/Omega
-docker ps -a --filter 'name=^/omega$'
-docker rm -f omega 2>/dev/null || true
-docker run -dit --name omega \
-  --network oma-monitor-test-net \
-  --security-opt no-new-privileges:true \
-  --init \
-  --tmpfs /tmp:size=64m,mode=1777 \
-  --tmpfs /var/tmp:size=64m,mode=1777 \
+docker run -dit --name oma-monitor-acceptance \
+  --network oma-monitor-acceptance-net \
+  --security-opt no-new-privileges:true --init \
+  --tmpfs /tmp:size=64m,mode=1777 --tmpfs /var/tmp:size=64m,mode=1777 \
   --tmpfs /run:size=16m,mode=755 \
-  --volume omega-monitor-test-memory:/PeTTa/repos/Omega/memory \
-  -e TEST_SERVER_IP=omega-mocks \
-  -e IMPORT_KB_ON_START=0 \
-  omega:monitor-test \
-  commchannel=test \
-  provider=Test \
-  embeddingprovider=Local \
+  --volume oma-monitor-acceptance-memory:/PeTTa/repos/Omega/memory \
+  -e TEST_SERVER_IP=oma-monitor-mocks -e IMPORT_KB_ON_START=0 \
+  -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
+  omega:monitor-test commchannel=test provider=Test embeddingprovider=Local \
   securityPolicyPath=/PeTTa/repos/Omega/profile/policy.yaml \
-  memoryDirectory=/PeTTa/repos/Omega/memory \
-  TEST_SERVER_IP=omega-mocks
-docker ps -a --filter 'name=^/omega$'
-docker logs --tail 100 -f omega
+  memoryDirectory=/PeTTa/repos/Omega/memory TEST_SERVER_IP=oma-monitor-mocks
 ```
 
-Wait for `Connected to: ('omega-mocks', 9766)`, `Connected to:
-('omega-mocks', 9765)`, and a runtime `CHARS_SENT: <number>` record. Do not
-substitute a real model or Telegram token merely to make the smoke test pass.
-
-Terminal 3 - run the monitor:
+Wait for connections to both mock ports and a `CHARS_SENT` record. In the Python
+test environment, run:
 
 ```bash
-cd /mnt/d/HyperClaw/Omega
-source ~/.venvs/oma-monitor/bin/activate
-export OMA_MONITOR_USERNAME=operator
-read -rsp 'Monitor password: ' OMA_MONITOR_PASSWORD; echo
-export OMA_MONITOR_PASSWORD
-export OMA_MONITOR_CONTAINER=omega
-python -m monitor.app
+OMA_MONITOR_INTEGRATION_CONTAINER=oma-monitor-acceptance \
+OMA_MONITOR_ACCEPTANCE_CONTAINER=oma-monitor-acceptance \
+  python -m pytest monitor/tests/test_docker_integration.py \
+    monitor/tests/test_acceptance_integration.py -q
 ```
 
-Open `http://127.0.0.1:8765/`. Verify authentication, real logs, Stop, Start,
-and Restart. The monitor's Start operation only starts the existing container;
-it never invokes `scripts/omega start` or recreates a missing container.
+Expected: three tests pass. The lifecycle test restores the initial state; the
+combined test checks authentication, real status/logs, fixed-target rejection,
+controls, and controlled Falco JSON filtering/redaction. This is not kernel capture.
 
-Run the opt-in integration while `omega` is disposable:
+For a browser check, point the independent monitor at this disposable target:
 
 ```bash
-OMA_MONITOR_INTEGRATION_CONTAINER=omega \
-  python -m unittest monitor.tests.test_docker_integration -v
+OMA_MONITOR_CONTAINER=oma-monitor-acceptance bash monitor/scripts/live.sh start
 ```
 
-Expected: two tests pass, covering real status/log retrieval and real
-Stop/Start/Restart.
-
-Cleanup after stopping the monitor and the foreground mock-service command:
+After stopping the monitor, remove only the resources you created for this test:
 
 ```bash
-docker rm -f omega
-docker volume rm omega-monitor-test-memory
-docker network rm oma-monitor-test-net
+docker stop oma-monitor-acceptance oma-monitor-mocks
+docker rm oma-monitor-acceptance oma-monitor-mocks
+docker volume rm oma-monitor-acceptance-memory
+docker network rm oma-monitor-acceptance-net
 ```
 
-If an older cached `singularitynet/omegaclaw:latest` image is used instead, its
-repository root may be `/PeTTa/repos/OmegaClaw-Core`; adjust the mounted and
-argument paths consistently. That validates the monitor integration but is not
-a substitute for building and testing the current checkout.
+## Real native-Linux Falco test
 
-## B. Combined WSL acceptance test (mock Falco events)
+Oma and Falco must share the native Linux kernel. The included rule macro selects
+`omega`; for a differently named disposable target, edit a separate test rule
+copy to match its name. Rules and event-file configuration must agree with the
+monitor's configured target. Do not run multiple test sensors unnecessarily.
 
-This is the final repeatable test before native-Linux Falco validation. It uses
-an existing disposable `omega` container, its real Docker logs and lifecycle,
-the authenticated Flask surface, and controlled Falco-format JSON. It stops,
-starts, and restarts the target, then restores its initial running/stopped
-state. It never creates or removes the container.
-
-```bash
-cd /mnt/d/HyperClaw/Omega
-source ~/.venvs/oma-monitor/bin/activate
-OMA_MONITOR_ACCEPTANCE_CONTAINER=omega \
-  python -m pytest monitor/tests/test_acceptance_integration.py -q -s
-```
-
-Expected: `1 passed`. This covers authentication, the fixed target, real
-status/logs, Stop/Start/Restart, security status/SSE, filtering out events for
-other containers, and secret redaction.
-
-Validate the actual Falco rule file semantically without attaching to the
-kernel:
+First validate the actual rules without kernel privileges:
 
 ```bash
 docker run --rm \
-  -v "$PWD/monitor/falco/oma_rules.yaml:/rules/oma_rules.yaml:ro" \
-  falcosecurity/falco:0.45.0 \
-  falco -V /rules/oma_rules.yaml
+  --mount "type=bind,src=$PWD/monitor/falco/oma_rules.yaml,dst=/rules/oma_rules.yaml,readonly" \
+  falcosecurity/falco:0.45.0 falco -V /rules/oma_rules.yaml
 ```
 
-Expected: `/rules/oma_rules.yaml: Ok`.
+Expected: `/rules/oma_rules.yaml: Ok`. After approval for privileged sensor access,
+start the sensor and independent monitor as described in [README.md](README.md).
+If they already run, reuse them. Check `docker logs oma-falco-live` for successful
+modern BPF probe startup and check that the container remains running.
 
-For a visual browser check, restart the monitor with a persistent fixture:
+With the authenticated browser security panel open:
 
 ```bash
-mkdir -p /tmp/oma-monitor
-: > /tmp/oma-monitor/falco-events.jsonl
-export OMA_MONITOR_SECURITY_EVENTS_FILE=/tmp/oma-monitor/falco-events.jsonl
-python -m monitor.app
+bash monitor/scripts/live.sh signals
 ```
 
-In a second WSL terminal, append a controlled outbound signal:
+The command runs a shell, attempts a localhost TCP connect, and calls
+`unshare(CLONE_NEWNS)` as nobody. Expect connection refusal and namespace denial.
+Find its unique printed marker in all three corresponding Falco rule events:
 
-```bash
-printf '%s\n' \
-  '{"time":"2026-10-06T12:00:00Z","priority":"Warning","rule":"Oma outbound connection attempt","output":"Test outbound token=secret","output_fields":{"container.name":"omega"}}' \
-  >> /tmp/oma-monitor/falco-events.jsonl
-```
+- `Unexpected shell or network utility in Oma`
+- `Oma outbound connection attempt`
+- `Oma namespace or mount manipulation`
 
-The authenticated page at `http://127.0.0.1:8765/` must show the outbound rule
-and `token=[REDACTED]`. This proves the browser integration, not kernel capture.
+Check raw JSON for `source: syscall`, the configured container name, and its ID;
+compare the ID with `docker inspect --format '{{.Id}}' omega`. The same marked
+events should appear through the authenticated monitor, with `token=[REDACTED]`.
+The raw file contains the harmless demonstration token. This helper does not
+execute the Docker-socket indicator; its native capture requires a separate,
+explicitly approved check.
 
-## C. Real Falco syscall test
-
-Falco's official Docker quickstart says it does not work on Windows/macOS
-Docker Desktop. A valid end-to-end test therefore uses a native Linux VM/server
-where Oma and Falco share a kernel. The commands below grant Falco privileged
-kernel access and must be approved for a dedicated test host.
-
-On that Linux host, after starting the disposable `omega` from section A:
-
-```bash
-mkdir -p /tmp/oma-falco-events
-docker run --rm -d --name oma-falco-test \
-  --privileged \
-  -v /sys/kernel/tracing:/sys/kernel/tracing:ro \
-  -v /var/run/docker.sock:/host/var/run/docker.sock \
-  -v /proc:/host/proc:ro \
-  -v /etc:/host/etc:ro \
-  -v "$PWD/monitor/falco/oma_rules.yaml:/rules/oma_rules.yaml:ro" \
-  -v /tmp/oma-falco-events:/events \
-  falcosecurity/falco:0.45.0 falco -U \
-  -r /rules/oma_rules.yaml \
-  -o engine.kind=modern_ebpf \
-  -o json_output=true \
-  -o stdout_output.enabled=false \
-  -o file_output.enabled=true \
-  -o file_output.keep_alive=false \
-  -o file_output.filename=/events/oma-events.jsonl
-```
-
-Configure the monitor before starting it:
-
-```bash
-export OMA_MONITOR_SECURITY_EVENTS_FILE=/tmp/oma-falco-events/oma-events.jsonl
-```
-
-Generate controlled indicators in the disposable Oma container:
-
-```bash
-docker exec omega sh -c 'wget -qO- https://example.com >/dev/null || true'
-docker exec omega sh -c 'unshare -m true || true'
-docker exec -u 0 omega sh -c 'mkdir -p /var/run; : > /var/run/docker.sock'
-```
-
-Verify that Falco, not a hand-written fixture, appended JSON records:
-
-```bash
-tail -f /tmp/oma-falco-events/oma-events.jsonl
-```
-
-The authenticated monitor should display the same events. Expected rule names
-include `Oma outbound connection attempt`, `Oma namespace or mount
-manipulation`, `Unexpected shell or network utility in Oma`, and `Oma attempts
-Docker socket access`.
-
-These events are indicators, not proof of compromise. The outbound rule is
-deliberately noisy until expected provider/DNS destinations are profiled and
-allowlisted. Do not automate Stop based on these prototype rules.
+Normal provider/Telegram connections trigger outbound Notices too. High counts
+are expected with the current alert-all prototype. Profile and review allowlists;
+do not automate containment based on these rules. Keep production sensor tuning,
+dropped-event metrics, and log retention separate from this short integration test.

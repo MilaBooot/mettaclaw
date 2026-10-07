@@ -1,4 +1,5 @@
 from pathlib import Path
+import base64
 import re
 
 from monitor.app import create_app
@@ -65,6 +66,26 @@ def test_invalid_credentials_are_denied():
         "/api/status", headers={"Authorization": "Basic b3BlcmF0b3I6d3Jvbmc="}
     )
     assert response.status_code == 401
+
+
+def test_non_ascii_invalid_credentials_return_401_instead_of_500():
+    client, _ = make_client()
+    encoded = base64.b64encode("operator:wrong-🔑".encode()).decode()
+    assert client.get("/api/status", headers={"Authorization": f"Basic {encoded}"}).status_code == 401
+
+
+def test_unicode_configured_credentials_can_authenticate():
+    app = create_app(MonitorConfig(username="opérateur", password="a-long-password-🔑"), FakeBackend())
+    app.testing = True
+    encoded = base64.b64encode("opérateur:a-long-password-🔑".encode()).decode()
+    assert app.test_client().get("/api/status", headers={"Authorization": f"Basic {encoded}"}).status_code == 200
+
+
+def test_non_ascii_csrf_token_is_rejected_without_an_action():
+    client, backend = make_client()
+    response = client.post("/api/actions/stop", headers={**auth(), "X-CSRF-Token": "é"}, json={})
+    assert response.status_code == 403
+    assert backend.actions == []
 
 
 def test_authenticated_status_uses_only_configured_backend():

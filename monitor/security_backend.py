@@ -34,6 +34,11 @@ class SecurityEventReader:
             return {"state": "not-configured", "configured": False}
         try:
             is_file = self.path.is_file()
+            if is_file:
+                with self.path.open("rb"):
+                    pass
+        except FileNotFoundError:
+            return {"state": "waiting-for-events-file", "configured": True}
         except OSError:
             return {"state": "events-file-unreadable", "configured": True}
         if not is_file:
@@ -52,6 +57,30 @@ class SecurityEventReader:
         while True:
             try:
                 stat = self.path.stat()
+                current_identity = (stat.st_dev, stat.st_ino)
+                rotated = identity is not None and current_identity != identity
+                truncated = current_identity == identity and stat.st_size < position
+                if identity is None or rotated or truncated:
+                    lines, position = self._tail_lines(self.path, count=100)
+                    identity = current_identity
+                    if rotated or truncated:
+                        yield self._system("Security event file rotated; following the replacement.")
+                elif stat.st_size > position:
+                    with self.path.open("rb") as stream:
+                        stream.seek(position)
+                        data = stream.read(min(stat.st_size - position, 1_048_576))
+                    end = data.rfind(b"\n") + 1
+                    lines = data[:end].splitlines()
+                    # Keep an unfinished JSON line until its terminating newline.
+                    # Oversized unterminated records are discarded in bounded chunks.
+                    position += end or (len(data) if len(data) == 1_048_576 else 0)
+                else:
+                    lines = []
+                waiting_notified = inaccessible_notified = False
+                for raw_line in lines:
+                    event = self._parse_event(raw_line)
+                    if event is not None:
+                        yield event
             except FileNotFoundError:
                 if not waiting_notified:
                     yield self._system("Waiting for the configured Falco events file.")
@@ -67,30 +96,6 @@ class SecurityEventReader:
                 self._sleep(self.poll_seconds)
                 continue
 
-            current_identity = (stat.st_dev, stat.st_ino)
-            rotated = identity is not None and current_identity != identity
-            truncated = current_identity == identity and stat.st_size < position
-            if identity is None or rotated or truncated:
-                if rotated or truncated:
-                    yield self._system("Security event file rotated; following the replacement.")
-                for raw_line in self._tail_lines(self.path, count=100):
-                    event = self._parse_event(raw_line)
-                    if event is not None:
-                        yield event
-                position = stat.st_size
-                identity = current_identity
-                waiting_notified = False
-                inaccessible_notified = False
-
-            if stat.st_size > position:
-                with self.path.open("rb") as stream:
-                    stream.seek(position)
-                    data = stream.read(min(stat.st_size - position, 1_048_576))
-                    position = stream.tell()
-                for raw_line in data.splitlines():
-                    event = self._parse_event(raw_line)
-                    if event is not None:
-                        yield event
             self._sleep(self.poll_seconds)
 
     def _parse_event(self, raw_line: bytes) -> dict[str, str] | None:
@@ -113,16 +118,19 @@ class SecurityEventReader:
             return None
 
     @staticmethod
-    def _tail_lines(path: Path, count: int, byte_limit: int = 1_048_576) -> list[bytes]:
+    def _tail_lines(path: Path, count: int, byte_limit: int = 1_048_576) -> tuple[list[bytes], int]:
         with path.open("rb") as stream:
             stream.seek(0, 2)
             size = stream.tell()
-            stream.seek(max(0, size - byte_limit))
+            start = max(0, size - byte_limit)
+            stream.seek(start)
             data = stream.read(byte_limit)
-        lines = data.splitlines()
+        end = data.rfind(b"\n") + 1
+        lines = data[:end].splitlines()
         if size > byte_limit and lines:
             lines = lines[1:]
-        return lines[-count:]
+        position = start + (end or (len(data) if len(data) == byte_limit else 0))
+        return lines[-count:], position
 
     @staticmethod
     def _system(message: str) -> dict[str, str]:

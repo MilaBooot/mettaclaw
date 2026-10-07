@@ -45,8 +45,8 @@ def create_app(
             valid = bool(
                 auth
                 and (auth.type or "").lower() == "basic"
-                and hmac.compare_digest(auth.username or "", settings.username)
-                and hmac.compare_digest(auth.password or "", settings.password)
+                and hmac.compare_digest((auth.username or "").encode(), settings.username.encode())
+                and hmac.compare_digest((auth.password or "").encode(), settings.password.encode())
             )
             if not valid:
                 return Response(
@@ -116,7 +116,7 @@ def create_app(
         if not request.is_json:
             return jsonify({"error": "application/json is required"}), 415
         candidate = request.headers.get("X-CSRF-Token", "")
-        if not candidate or not hmac.compare_digest(candidate, csrf_token):
+        if not candidate or not hmac.compare_digest(candidate.encode(), csrf_token.encode()):
             return jsonify({"error": "invalid-csrf-token"}), 403
         if request.headers.get("Sec-Fetch-Site", "").lower() == "cross-site":
             return jsonify({"error": "cross-site-request-denied"}), 403
