@@ -18,6 +18,7 @@ mock/test_memory_history_mock.py
 mock/test_memory_missing_history_file_mock.py
 mock/test_memory_pin_window_visibility_mock.py
 mock/test_openclaw_delegate_mock.py
+mock/test_subagent_sessions_mock.py
 mock/test_pin_invisible_within_iteration_mock.py
 mock/test_prompt_missing_files_mock.py
 mock/test_rpc.py
@@ -40,3 +41,4 @@ test_wschat.py
 unit/test_fileio_verified_writes.py
 unit/test_helper_parsing.py
 unit/test_openclaw_unit.py
+unit/test_subagents_unit.py

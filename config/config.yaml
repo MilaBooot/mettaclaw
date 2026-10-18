@@ -141,3 +141,5 @@ openClawEnabled: disabled
 # See plugins/openclaw/README.md.
 openClawURL: "http://172.17.0.1:18789"
 openClawAgent: "main"
+# Persistent specialist session/run/message index used by the OpenClaw plugin.
+subagentStorePath: "./memory/subagent_sessions.sqlite3"

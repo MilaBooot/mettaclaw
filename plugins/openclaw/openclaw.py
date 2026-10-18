@@ -268,7 +268,8 @@ def _run(
 def _send_with_startup_retry(
     message: str,
     openclaw_url: str,
-    openclaw_agent: str
+    openclaw_agent: str,
+    previous_response_id: str | None = None,
 ) -> str:
     """Run one turn, retrying while the Gateway reports it is still starting.
 
@@ -293,7 +294,8 @@ def _send_with_startup_retry(
             return _send(
                 message=message,
                 openclaw_url=openclaw_url,
-                openclaw_agent=openclaw_agent
+                openclaw_agent=openclaw_agent,
+                previous_response_id=previous_response_id,
             )
         except OpenClawStartupError as startup_error:
             last_error = startup_error
@@ -311,7 +313,8 @@ def _send_with_startup_retry(
 def _send(
     message: str,
     openclaw_url: str,
-    openclaw_agent: str
+    openclaw_agent: str,
+    previous_response_id: str | None = None,
 ) -> str:
     """Post one agent turn to the Gateway and return the result.
 
@@ -337,12 +340,15 @@ def _send(
     try:
         with requests.Session() as session:
             session.trust_env = False
+            payload = {
+                "model": MODEL_ROUTE,
+                "input": message,
+            }
+            if previous_response_id:
+                payload["previous_response_id"] = previous_response_id
             response = session.post(
                 url=endpoint,
-                json={
-                    "model": MODEL_ROUTE,
-                    "input": message,
-                },
+                json=payload,
                 headers=headers,
                 timeout=SESSION_TIMEOUT,
             )

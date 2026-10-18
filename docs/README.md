@@ -33,6 +33,8 @@ Numbered in suggested reading order. Each tutorial is self-contained.
 
 ---
 
+- [tutorial-09-persistent-subagents.md](./tutorial-09-persistent-subagents.md) — Watch Omega delegate to persistent research, coding, and reviewer specialists from any chat channel
+
 ## Reference
 
 ### Reasoning engines and orchestration

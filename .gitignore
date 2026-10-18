@@ -9,6 +9,7 @@ repos/
 # secrets
 .env
 memory/.channel/
+memory/subagent_sessions.sqlite3*
 
 # venv
 .venv 

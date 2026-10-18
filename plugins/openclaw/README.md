@@ -4,10 +4,30 @@ Adds the `delegate-task-to-openclaw-agent` skill, which hands a self-contained
 task to an agent running on an external [OpenClaw](https://docs.openclaw.ai)
 Gateway and reports its reply.
 
+It also contains the experimental persistent-subagent MVP. The MVP keeps
+Omega as the continuous orchestrator and adds three definitions around one
+runtime:
+
+| Definition | Capabilities | Tool categories |
+| --- | --- | --- |
+| `research-agent` | research, search, comparison, summarisation | web search, file/memory reads |
+| `coding-agent` | coding, debugging, testing, repository inspection | file reads/writes, shell, tests, git reads |
+| `reviewer-agent` | review, validation, critique | file/test/result inspection |
+
+The definitions are routing and policy metadata, not three copied agent
+implementations. All three use the same selector, context projector, OpenClaw
+executor, SQLite session store, and structured result contract.
+
 Each delegation runs in its own OpenClaw session: the
 [OpenResponses HTTP API](https://docs.openclaw.ai/gateway/openresponses-http-api)
 is stateless per request and generates a fresh session key for every call, so
 delegated tasks never inherit context from each other.
+
+Persistent subagent calls are the deliberate exception: a new task still gets
+a new session, while `resume-subagent-session` sends the stored
+`previous_response_id`. OpenClaw then continues that one worker session. The
+session id, run records, projected prompts, raw worker replies, compact
+summaries, and continuation id are indexed in one local SQLite database.
 
 Delegation is **asynchronous**. A Gateway turn can take minutes while the agent
 loop is single-threaded, so the skill hands the task to a worker thread and
@@ -48,6 +68,14 @@ The target agent must exist in `openclaw.json` under `agents.entries`. The
 default install provides `main`. The run uses whatever model that agent is
 configured with - the plugin never overrides it.
 
+For the persistent-subagent skills, configure agents with these exact ids:
+`research-agent`, `coding-agent`, and `reviewer-agent`. Give each a separate
+workspace and an OpenClaw `tools.allow`/`tools.deny` policy matching the table
+above. The HyperClaw runtime rejects explicitly requested tool categories that
+are outside its definition, while the Gateway policy is the enforcement layer
+for tools the worker can actually invoke. Specialists should not be allowed to
+delegate recursively in this MVP.
+
 ### 3. Get the Gateway token
 
 Token auth is the default (`gateway.auth.mode: "token"`). The value lives in
@@ -61,6 +89,7 @@ the Gateway's `.env` as `OPENCLAW_GATEWAY_TOKEN`.
 openClawEnabled: enabled
 openClawURL: "http://172.17.0.1:18789"
 openClawAgent: "main"
+subagentStorePath: "./memory/subagent_sessions.sqlite3"
 ```
 
 `config/plugins.yaml`:
@@ -177,6 +206,135 @@ Two consequences worth knowing:
 
 `reply` is truncated to `MAX_REPLY_CHARS` so that one large answer cannot evict
 the rest of the history window (`maxHistory`).
+
+## Persistent subagent MVP
+
+### Delegate a new task
+
+The selector is deterministic. `research`, `coding`, and `review` select the
+matching definition; an explicit-agent skill is available for tests or when
+Omega already knows the desired worker.
+
+```text
+delegate-task-to-subagent(
+  task="Research persistent OpenClaw sessions",
+  capability="research",
+  context="Only compare session creation and continuation; cite evidence"
+)
+```
+
+At the MeTTa skill surface this is:
+
+```metta
+(delegate-task-to-subagent
+  "Research persistent OpenClaw sessions"
+  "research"
+  "Only compare session creation and continuation; cite evidence")
+```
+
+The third argument can instead be a JSON object with `context`, `facts`,
+`constraints`, `artifacts`, `expected_output`, `evaluation_criteria`, and
+`requested_tools`. Nothing from Omega's full history is added implicitly.
+
+The immediate result identifies the persisted work:
+
+```json
+{
+  "status": "accepted",
+  "agent_id": "research-agent",
+  "session_id": "ses-...",
+  "run_id": "run-..."
+}
+```
+
+When the worker finishes, the heartbeat adds one bounded line to Omega's
+history. The full projected prompt and raw reply remain only in SQLite:
+
+```text
+SUBAGENT_RESULT agent=research-agent session=ses-... run=run-... status=completed summary=... findings=... evidence=...
+```
+
+### Resume the same task
+
+Use the earlier `session_id`. This creates a different `run_id` and sends the
+last OpenClaw response id as `previous_response_id`:
+
+```metta
+(resume-subagent-session
+  "ses-..."
+  "Continue the research and verify restart persistence"
+  "Limit the follow-up to continuation behavior")
+```
+
+Use a new delegation, not resume, for unrelated work. A session cannot be
+resumed as a different agent.
+
+### Inspect progress
+
+The coordinator can inspect one known session without loading its private
+worker messages into the main context:
+
+```metta
+(inspect-subagent-session "ses-...")
+```
+
+The result contains the selected agent, current session status, summary, total
+run count, and up to 20 recent run records. It excludes projected prompts, raw
+worker replies, and the OpenClaw continuation id. This makes questions such as
+"which specialist is handling this?" and "did the resumed run finish?"
+answerable through Telegram, IRC, or any other configured channel.
+
+For an end-to-end chat demonstration and expected messages, see
+[`docs/tutorial-09-persistent-subagents.md`](../../docs/tutorial-09-persistent-subagents.md).
+
+### Explicit worker override
+
+```metta
+(delegate-task-to-specific-subagent
+  "Review the implementation against the acceptance criteria"
+  "reviewer-agent"
+  "Inspect only the supplied patch and test results")
+```
+
+### Stored model
+
+The single SQLite file has three tables:
+
+- `subagent_sessions`: worker ownership, title/status/summary, and the latest
+  OpenClaw continuation id;
+- `subagent_runs`: one row for every initial invocation or resume;
+- `subagent_messages`: the bounded input projection, raw reply, and failures.
+
+OpenClaw remains the source of truth for the worker's internal tool transcript;
+the local table records what HyperClaw sent and what the worker returned. This
+avoids copying large child traces into Omega while keeping enough local state
+for audit, selection, and resume.
+
+There is intentionally no FTS table in this first MVP. Search, learned ranking,
+parallel orchestration policy, child-to-child messaging, recursive delegation,
+same-session concurrency control, and crash recovery for in-flight threads are
+follow-up work.
+
+### Run the focused MVP tests
+
+From the repository root:
+
+```bash
+python -m pytest Autotests/unit/test_subagents_unit.py \
+  Autotests/unit/test_openclaw_unit.py -q
+```
+
+These tests require no live Gateway. For a live demo, enable the plugin and
+OpenResponses endpoint, create the three OpenClaw agents, delegate a research
+task, copy its returned `session_id`, and call the resume skill. Inspect run
+separation with:
+
+```bash
+sqlite3 memory/subagent_sessions.sqlite3 \
+  "select session_id, agent_id, status, summary from subagent_sessions;"
+sqlite3 memory/subagent_sessions.sqlite3 \
+  "select run_id, session_id, goal, status from subagent_runs order by started_at;"
+```
 
 ## Troubleshooting
 

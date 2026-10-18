@@ -247,6 +247,37 @@ def test_request_target_refuses_when_it_cannot_authenticate(oc, monkeypatch):
         oc._request_target("http://gw:18789")
 
 
+def test_send_includes_previous_response_id_only_for_resume(oc, monkeypatch):
+    payloads = []
+
+    class Session:
+        trust_env = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, **kwargs):
+            payloads.append(kwargs["json"])
+            return _Response(200, {
+                "id": "resp-next",
+                "output": [{
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "done"}],
+                }],
+            })
+
+    monkeypatch.setattr(oc, "_request_target", lambda url: ("http://gw/v1/responses", {}))
+    monkeypatch.setattr(oc.requests, "Session", Session)
+    oc._send("new", "http://gw", "research-agent")
+    oc._send("continue", "http://gw", "research-agent", "resp-old")
+
+    assert "previous_response_id" not in payloads[0]
+    assert payloads[1]["previous_response_id"] == "resp-old"
+
+
 def test_take_completed_drains_once(oc):
     oc._completed = ["first", "second"]
     assert oc.take_completed() == "first\nsecond"
