@@ -1,5 +1,12 @@
 # OpenClaw plugin
 
+> **OpenClaw is used only as the MVP worker-execution adapter. It lets the
+> team validate persistent multi-agent delegation against a real runtime; it
+> is not proposed as a mandatory Omega core dependency. Selection, bounded
+> context, persistence, and structured results are Omega-owned contracts, and
+> the next architecture phase will add a native Omega executor behind an
+> explicit replaceable backend interface.**
+
 Adds the `delegate-task-to-openclaw-agent` skill, which hands a self-contained
 task to an agent running on an external [OpenClaw](https://docs.openclaw.ai)
 Gateway and reports its reply.

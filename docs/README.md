@@ -35,6 +35,10 @@ Numbered in suggested reading order. Each tutorial is self-contained.
 
 - [tutorial-09-persistent-subagents.md](./tutorial-09-persistent-subagents.md) — Watch Omega delegate to persistent research, coding, and reviewer specialists from any chat channel
 
+## MVP validation
+
+- [persistent-subagent-mvp-validation-report.md](./persistent-subagent-mvp-validation-report.md) — Live Telegram/OpenRouter/OpenClaw results, evidence checklist, MVP boundaries, and the native Omega backend roadmap
+
 ## Reference
 
 ### Reasoning engines and orchestration
