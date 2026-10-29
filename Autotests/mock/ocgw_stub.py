@@ -19,13 +19,14 @@ token, whether two delegations landed in separate sessions, and whether a
 persistent subagent supplied ``previous_response_id`` when it resumed.
 """
 import json
+import os
 import re
 import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-GATEWAY_PORT = 18789
+GATEWAY_PORT = int(os.environ.get("OMEGACLAW_GATEWAY_PORT", "18789"))
 RESPONSES_PATH = "/v1/responses"
 
 
@@ -79,7 +80,12 @@ def _make_handler(recorder):
             for key, value in (extra_headers or {}).items():
                 self.send_header(key, value)
             self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                # Expected when a deadline closes the client connection and
+                # aborts a run before this deterministic stub wakes up.
+                pass
 
         def do_GET(self):
             self._reply(200, {"status": "alive"})

@@ -32,7 +32,7 @@
 (= (getContext)
    (string-safe (py-str ("PROMPT: " (getPrompt (provider)) " SKILLS: " (getSkills)
                          (newline) (getPromptExtensions) (newline)
-                         " OUTPUT_FORMAT: Up to 5 lines, do not wrap quotes around args, do not use variables:" (newline)
+                         " OUTPUT_FORMAT: Up to 5 lines, do not use variables. For a skill with multiple arguments, put its arguments in one JSON array after the tool name:" (newline)
                          " toolName1 arg1" (newline)
                          " toolName2 arg2" (newline)
                          " toolName3 arg3" (newline)

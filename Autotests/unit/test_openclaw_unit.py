@@ -249,6 +249,7 @@ def test_request_target_refuses_when_it_cannot_authenticate(oc, monkeypatch):
 
 def test_send_includes_previous_response_id_only_for_resume(oc, monkeypatch):
     payloads = []
+    timeouts = []
 
     class Session:
         trust_env = True
@@ -261,6 +262,7 @@ def test_send_includes_previous_response_id_only_for_resume(oc, monkeypatch):
 
         def post(self, **kwargs):
             payloads.append(kwargs["json"])
+            timeouts.append(kwargs["timeout"])
             return _Response(200, {
                 "id": "resp-next",
                 "output": [{
@@ -272,10 +274,75 @@ def test_send_includes_previous_response_id_only_for_resume(oc, monkeypatch):
     monkeypatch.setattr(oc, "_request_target", lambda url: ("http://gw/v1/responses", {}))
     monkeypatch.setattr(oc.requests, "Session", Session)
     oc._send("new", "http://gw", "research-agent")
-    oc._send("continue", "http://gw", "research-agent", "resp-old")
+    oc._send(
+        "continue",
+        "http://gw",
+        "research-agent",
+        "resp-old",
+        max_output_tokens=500,
+        max_tool_calls=3,
+        timeout_seconds=45,
+    )
 
     assert "previous_response_id" not in payloads[0]
     assert payloads[1]["previous_response_id"] == "resp-old"
+    assert payloads[1]["max_output_tokens"] == 500
+    assert payloads[1]["max_tool_calls"] == 3
+    assert timeouts[1] == 45
+
+
+@pytest.mark.parametrize(
+    ("status_code", "message", "outcome"),
+    [
+        (403, "policy denied", "blocked"),
+        (408, "request timeout", "timed_out"),
+        (500, "agent run was cancelled", "cancelled"),
+        (500, "internal error", "failed"),
+    ],
+)
+def test_http_error_preserves_terminal_outcome(oc, status_code, message, outcome):
+    response = _Response(
+        status_code=status_code,
+        payload={"error": {"message": message, "type": "api_error"}},
+        reason="error",
+        ok=False,
+    )
+    assert oc._http_error(response).outcome == outcome
+
+
+def test_request_timeout_is_preserved_as_timed_out(oc, monkeypatch):
+    monkeypatch.setattr(oc, "_request_target", lambda _url: ("http://gw", {}))
+
+    class TimeoutSession:
+        trust_env = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def post(self, **_kwargs):
+            raise oc.requests.Timeout("deadline reached")
+
+    monkeypatch.setattr(oc.requests, "Session", TimeoutSession)
+    with pytest.raises(oc.OpenClawError) as raised:
+        oc._send("task", "http://gw", "research-agent", timeout_seconds=1)
+    assert raised.value.outcome == "timed_out"
+
+
+def test_extract_reply_preserves_incomplete_outcome(oc):
+    result = json.loads(oc._extract_reply({
+        "id": "resp-limited",
+        "status": "incomplete",
+        "incomplete_details": {"reason": "max_output_tokens"},
+        "output": [{
+            "type": "message",
+            "content": [{"type": "output_text", "text": "partial"}],
+        }],
+    }))
+    assert result["status"] == "blocked"
+    assert result["message"] == "partial"
 
 
 def test_take_completed_drains_once(oc):

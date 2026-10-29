@@ -46,9 +46,17 @@
                         inspect-subagent-session
                         "Inspect one persistent subagent session and its recent run statuses without exposing the worker's private context or transcript."
                         (session_id_in_quotes))
+                    (add-skill
+                        dispose-subagent-session
+                        "Dispose one idle subagent session. Pass false to retain run metadata while deleting private messages and continuation state, or true to purge the complete session."
+                        (session_id_in_quotes purge_true_or_false))
+                    (add-skill
+                        cleanup-subagent-scope
+                        "Dispose every idle subagent session owned by a workflow or space scope. Pass true to purge complete records during scope cleanup."
+                        (scope_id_in_quotes purge_true_or_false))
                     (add-prompt-extension
                         subagent-coordination
-                        "SUBAGENT COORDINATION: When a subagent delegation is accepted, tell the user which agent was selected and include its session and run ids. When a new SUBAGENT_RESULT appears in history, report its final status and summary once. Use inspect-subagent-session when the user asks for status. Do not expose stored worker prompts, raw replies, or intermediate reasoning.")
+                        "SUBAGENT COORDINATION: When a subagent delegation is accepted, tell the user which agent was selected and include its session and run ids. When a new SUBAGENT_RESULT appears in history, report its final status and summary once. A timed_out result is unfinished work: inspect possible partial effects, then decide whether one smaller, safer retry is appropriate; never blindly repeat a side-effecting task. Use inspect-subagent-session when the user asks for status. Do not expose stored worker prompts, raw replies, or intermediate reasoning.")
                     (add-heartbeat-listener
                         openclaw
                         (|-> ($iter) (openclaw-collect-results $iter)))
@@ -102,6 +110,22 @@
         (subagentStorePath)
     )))
 
+(= (dispose-subagent-session $session-id $purge)
+    (py-call (
+        subagents.dispose_session
+        $session-id
+        $purge
+        (subagentStorePath)
+    )))
+
+(= (cleanup-subagent-scope $scope-id $purge)
+    (py-call (
+        subagents.dispose_scope
+        $scope-id
+        $purge
+        (subagentStorePath)
+    )))
+
 ; Delegations run off the agent loop, so their replies are picked up here once
 ; per iteration and appended to the history, which - unlike a prompt extension
 ; or LAST_SKILL_USE_RESULTS - also holds them while the agent is idle. Reading
@@ -125,9 +149,8 @@
             ())))
 
 (= (subagent-collect-results $iteration)
-    (let $results (repr (py-call (subagents.take_completed)))
-        (if (> (string_length $results) 0)
-            (append-file
-                (joinPath ((projectRootDirectory) "memory" "history.metta"))
-                (swrite ((get_time_as_string) (newline) $results (newline))))
-            ())))
+    (py-call (
+        subagents.deliver_completed
+        (subagentStorePath)
+        (joinPath ((projectRootDirectory) "memory" "history.metta"))
+    )))

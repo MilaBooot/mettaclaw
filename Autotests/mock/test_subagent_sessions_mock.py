@@ -36,6 +36,21 @@ print(json.dumps({'session': session, 'runs': runs, 'messages': messages}))
     return json.loads(result.stdout.strip())
 
 
+def _session_id_for_scope(scope_id):
+    script = """
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+row = db.execute(
+    'select session_id from subagent_sessions where scope_id = ? '
+    'order by created_at desc limit 1',
+    (sys.argv[2],),
+).fetchone()
+print(row[0] if row else '')
+"""
+    result = dexec("python3", "-c", script, DB_PATH, scope_id)
+    return result.stdout.strip()
+
+
 def test_subagent_new_session_and_resume_mock(llm, comm, gateway):
     with Checker("persistent subagent new session and resume") as c:
         print(f"\n=== OmegaClaw: persistent subagent mock (run-id {c.run_id}) ===", flush=True)
@@ -147,4 +162,83 @@ def test_subagent_new_session_and_resume_mock(llm, comm, gateway):
         if len(final_db["messages"]) != 4:
             c.fail("messages", f"expected four persisted messages: {final_db['messages']}")
         c.ok("runs", "same session now owns two distinct persisted runs")
+        c.done()
+
+
+def test_subagent_timeout_returns_control_to_coordinator_mock(llm, comm, gateway):
+    with Checker("persistent subagent timeout feedback") as c:
+        print(f"\n=== OmegaClaw: subagent timeout (run-id {c.run_id}) ===", flush=True)
+        scope_id = f"mock-timeout-{c.run_id}"
+        arguments = json.dumps([
+            "Deadline test",
+            "research",
+            {
+                "scope_id": scope_id,
+                "context": "OCGW_SLEEP:2",
+                "budget": {"timeout_seconds": 1},
+            },
+        ], separators=(",", ":"))
+
+        c.step("delegate a run whose one-second deadline expires")
+        prompt = make_prompt(c.run_id, "Test the persistent specialist deadline.")
+        llm.set_answer(
+            request=prompt,
+            response=(
+                f'delegate-task-to-subagent {arguments}\n'
+                f'send Timeout test accepted {c.run_id}'
+            ),
+        )
+        if not comm.send_message(prompt):
+            c.fail("comm", "could not deliver the timeout prompt")
+        if not wait_for_skill_call(
+            c.run_id, "send", timeout=30, arg_substr="Timeout test accepted"
+        ):
+            c.fail("send", "Omega did not acknowledge the timeout test")
+
+        session_id = _session_id_for_scope(scope_id)
+        if not session_id:
+            c.fail("acceptance", "structured scope did not reach session storage")
+        snapshot = _database_snapshot(session_id)
+        run_id = snapshot["runs"][0]["run_id"]
+        if snapshot["session"]["scope_id"] != scope_id:
+            c.fail("context", f"scope was not preserved: {snapshot['session']}")
+        if not wait_for_history_keyword(
+            c.run_id,
+            [
+                f"session={session_id}",
+                f"run={run_id}",
+                "status=timed_out",
+                "retryable=true",
+            ],
+            timeout=RESULT_TIMEOUT,
+            require_all=True,
+        ):
+            c.fail("timeout", "timed-out result did not return to Omega history")
+
+        snapshot = _database_snapshot(session_id)
+        if snapshot["session"]["status"] != "timed_out":
+            c.fail("database", f"timeout was not persisted: {snapshot}")
+        if snapshot["runs"][0]["status"] != "timed_out":
+            c.fail("run", f"run timeout was not preserved: {snapshot['runs']}")
+        c.ok("timeout", "deadline stopped the worker and returned retry feedback")
+
+        c.step("purge the completed timeout scope through the dynamic skill parser")
+        cleanup_prompt = make_prompt(c.run_id + 1, "Clean up the timeout scope.")
+        cleanup_arguments = json.dumps([scope_id, True], separators=(",", ":"))
+        llm.set_answer(
+            request=cleanup_prompt,
+            response=(
+                f'cleanup-subagent-scope {cleanup_arguments}\n'
+                f'send Timeout scope cleaned {c.run_id}'
+            ),
+        )
+        if not comm.send_message(cleanup_prompt):
+            c.fail("cleanup-comm", "could not deliver the scope cleanup prompt")
+        if not wait_for_skill_call(
+            c.run_id, "send", timeout=30, arg_substr="Timeout scope cleaned"
+        ):
+            c.fail("cleanup-send", "Omega did not acknowledge scope cleanup")
+        if _session_id_for_scope(scope_id):
+            c.fail("cleanup", "purged scope still has a stored session")
+        c.ok("cleanup", "scope cleanup purged the timed-out session")
         c.done()

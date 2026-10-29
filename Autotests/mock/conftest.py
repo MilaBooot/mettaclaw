@@ -22,6 +22,7 @@ runs.
 import os
 import re
 import subprocess
+import time
 
 import pytest
 
@@ -81,14 +82,32 @@ def openclaw_gateway():
     # the MeTTa source dump and its prolog translation, so the plain text
     # appears even when the plugin is off.
     container = os.environ.get("OMEGACLAW_CONTAINER", "omegaclaw")
-    logs = subprocess.run(["docker", "logs", container],
-                          capture_output=True, text=True, errors="replace")
-    enabled = re.search(r"\|\s*openclaw-plugin\s*\|\s*\"OpenClaw integration is enabled\"",
-                        logs.stdout + logs.stderr)
+    enabled = None
+    loop_ready = None
+    # A cold MeTTa startup can spend close to a minute loading/translating the
+    # runtime before plugins emit their readiness log. Leave headroom for
+    # slower Docker Desktop hosts as well.
+    deadline = time.monotonic() + 120
+    while (enabled is None or loop_ready is None) and time.monotonic() < deadline:
+        logs = subprocess.run(["docker", "logs", container],
+                              capture_output=True, text=True, errors="replace")
+        output = logs.stdout + logs.stderr
+        enabled = re.search(
+            r"\|\s*openclaw-plugin\s*\|\s*\"OpenClaw integration is enabled\"",
+            output,
+        )
+        loop_ready = re.search(r"CHARS_SENT:\s*[0-9]+", output)
+        if enabled is None or loop_ready is None:
+            time.sleep(0.5)
     if not enabled:
         pytest.fail("OMEGACLAW_OPENCLAW_TOKEN is set but the openclaw plugin is disabled in "
                     f"container {container!r}: start it with -g <gateway url> "
                     f"pointing at port {GATEWAY_PORT}")
+    if not loop_ready:
+        pytest.fail(
+            f"container {container!r} did not finish channel/provider startup "
+            "before the readiness deadline"
+        )
     stub = GatewayStub(token).start()
     try:
         yield stub

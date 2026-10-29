@@ -98,6 +98,29 @@ specialist. Report the selected agent, session id, run id, and final verdict.
 The expected selected id is `reviewer-agent` and the session id must differ
 from the research session.
 
+## Verify hardening behavior
+
+Use a `scope_id` such as `demo-review` in the delegation context, then ask
+Omega to clean up that scope. Idle sessions in that scope should be disposed
+or purged, while sessions from other scopes remain available. Attempting two
+overlapping resumes of one session should accept only one run; the other
+returns a busy error. Completed results remain in the SQLite outbox until the
+history append is acknowledged, and inspection preserves `failed`,
+`cancelled`, `blocked`, and `timed_out` outcomes.
+
+For a bounded run, supply a context object with a smaller `budget`, for
+example `max_context_chars: 8000`, `max_output_tokens: 1000`,
+`max_tool_calls: 5`, and `timeout_seconds: 120`. Context and timeout ceilings
+are enforced by Omega. The current OpenClaw adapter forwards the output-token
+and tool-call values, but exact tool-call counting is not supported by its
+OpenResponses endpoint; configure strict per-agent tool policies as well.
+
+Use roughly 120 seconds for a quick lookup/review, the 300-second default for
+a normal task, and at most 600 seconds for a bounded long task. A timeout is
+returned as `status=timed_out retryable=true`; Omega should inspect partial
+effects and reformulate or split the task before one deliberate retry. It
+must not blindly repeat coding, shell, or other side-effecting work.
+
 ## Operator evidence
 
 Chat is the user-facing view. Operators can also watch lifecycle events without
@@ -133,4 +156,8 @@ python -m pytest mock/test_subagent_sessions_mock.py -s -v
   worker action.
 - In-flight worker threads do not survive an OmegaClaw container restart.
 - Searchable history, ranking, parallel orchestration policy, and crash
-  recovery belong to later phases.
+  recovery/reconciliation belong to later phases.
+- Workflow and space teardown must call `cleanup-subagent-scope`; Omega does
+  not yet publish a generic automatic teardown event to plugins.
+- Exact per-run tool-call limits require a backend that enforces that field;
+  OpenClaw currently relies on its server-side agent tool policy.

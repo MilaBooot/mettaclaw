@@ -240,8 +240,36 @@ At the MeTTa skill surface this is:
 ```
 
 The third argument can instead be a JSON object with `context`, `facts`,
-`constraints`, `artifacts`, `expected_output`, `evaluation_criteria`, and
-`requested_tools`. Nothing from Omega's full history is added implicitly.
+`constraints`, `artifacts`, `expected_output`, `evaluation_criteria`,
+`requested_tools`, `scope_id`, and `budget`. Nothing from Omega's full history
+is added implicitly. A budget may lower (but never raise) the system ceilings
+for context characters, output tokens, tool calls, and elapsed seconds:
+
+```json
+{
+  "scope_id": "workflow-42",
+  "requested_tools": ["read-file"],
+  "budget": {
+    "max_context_chars": 8000,
+    "max_output_tokens": 1000,
+    "max_tool_calls": 5,
+    "timeout_seconds": 120
+  }
+}
+```
+
+Channel users can request this in ordinary language. Internally, Omega's
+dynamic-skill parser transports multi-argument calls as one JSON array so the
+nested context object cannot be merged with the task or capability argument.
+If text begins like a structured context object but is not valid JSON, the
+delegation is rejected instead of silently using the default scope or budget.
+
+The resolved tool subset is retained in the prepared run and worker prompt.
+The OpenClaw adapter forwards token and tool-call limits. OpenClaw currently
+treats `max_output_tokens` as best effort and accepts but does not enforce
+`max_tool_calls`, so its per-agent `tools.allow`/`tools.deny` policy remains
+the security boundary. A future native executor must enforce every budget
+field directly.
 
 The immediate result identifies the persisted work:
 
@@ -255,11 +283,29 @@ The immediate result identifies the persisted work:
 ```
 
 When the worker finishes, the heartbeat adds one bounded line to Omega's
-history. The full projected prompt and raw reply remain only in SQLite:
+history. Completion is first committed to a SQLite outbox, then leased,
+appended and flushed to history, and finally acknowledged. An interrupted
+delivery is retried without duplicating a result already present in history.
+The full projected prompt and raw reply remain only in SQLite:
 
 ```text
 SUBAGENT_RESULT agent=research-agent session=ses-... run=run-... status=completed summary=... findings=... evidence=...
 ```
+
+Terminal states remain distinct: `completed`, `failed`, `cancelled`,
+`blocked`, and `timed_out` are persisted and reported without coercion.
+A timed-out result includes a retry hint for the coordinator, but retry is a
+decision rather than an automatic loop: the coordinator should first inspect
+possible partial effects and then submit a smaller task if repeating it is
+safe.
+
+There is no universal subagent runtime standard. This MVP uses a practical
+three-tier policy: about 120 seconds for quick review/lookup work, 300 seconds
+as the normal default, and up to the 600-second system ceiling for bounded
+coding or deeper research. Set `budget.timeout_seconds` per run. When the
+deadline expires, Omega closes the OpenResponses request; OpenClaw connects
+that client disconnect to its run abort signal, and Omega persists and
+delivers `timed_out` back to the coordinator.
 
 ### Resume the same task
 
@@ -274,7 +320,8 @@ last OpenClaw response id as `previous_response_id`:
 ```
 
 Use a new delegation, not resume, for unrelated work. A session cannot be
-resumed as a different agent.
+resumed as a different agent. SQLite serializes run creation, and a second
+run for the same session is rejected while the first remains `running`.
 
 ### Inspect progress
 
@@ -291,6 +338,27 @@ worker replies, and the OpenClaw continuation id. This makes questions such as
 "which specialist is handling this?" and "did the resumed run finish?"
 answerable through Telegram, IRC, or any other configured channel.
 
+### Dispose sessions and workflow scopes
+
+Dispose an idle session while retaining non-sensitive run metadata:
+
+```metta
+(dispose-subagent-session "ses-..." false)
+```
+
+This deletes private messages, clears the continuation id, removes pending
+delivery records, and prevents later resume. Pass `true` to purge the session
+and all of its runs. To clean up all sessions assigned the same `scope_id`:
+
+```metta
+(cleanup-subagent-scope "workflow-42" true)
+```
+
+Active sessions are reported as busy rather than being deleted underneath a
+running worker. Omega does not yet expose a generic cross-plugin space-delete
+event, so workflow/space owners must call this cleanup skill from their
+existing teardown path.
+
 For an end-to-end chat demonstration and expected messages, see
 [`docs/tutorial-09-persistent-subagents.md`](../../docs/tutorial-09-persistent-subagents.md).
 
@@ -305,12 +373,14 @@ For an end-to-end chat demonstration and expected messages, see
 
 ### Stored model
 
-The single SQLite file has three tables:
+The single SQLite file has four tables:
 
-- `subagent_sessions`: worker ownership, title/status/summary, and the latest
-  OpenClaw continuation id;
+- `subagent_sessions`: worker/scope ownership, lifecycle state, summary, and
+  the latest OpenClaw continuation id;
 - `subagent_runs`: one row for every initial invocation or resume;
-- `subagent_messages`: the bounded input projection, raw reply, and failures.
+- `subagent_messages`: the bounded input projection, raw reply, and failures;
+- `subagent_outbox`: durable result delivery state, attempts, leases, and
+  acknowledgements.
 
 OpenClaw remains the source of truth for the worker's internal tool transcript;
 the local table records what HyperClaw sent and what the worker returned. This
@@ -319,8 +389,9 @@ for audit, selection, and resume.
 
 There is intentionally no FTS table in this first MVP. Search, learned ranking,
 parallel orchestration policy, child-to-child messaging, recursive delegation,
-same-session concurrency control, and crash recovery for in-flight threads are
-follow-up work.
+and crash recovery/reconciliation for in-flight worker threads are follow-up
+work. Completed result delivery survives restart; a request that was still
+executing when the process died does not.
 
 ### Run the focused MVP tests
 
@@ -341,6 +412,8 @@ sqlite3 memory/subagent_sessions.sqlite3 \
   "select session_id, agent_id, status, summary from subagent_sessions;"
 sqlite3 memory/subagent_sessions.sqlite3 \
   "select run_id, session_id, goal, status from subagent_runs order by started_at;"
+sqlite3 memory/subagent_sessions.sqlite3 \
+  "select delivery_id, run_id, state, attempts from subagent_outbox;"
 ```
 
 ## Troubleshooting

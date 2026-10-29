@@ -126,6 +126,53 @@ def test_balance_escapes_backslash_in_shell_command(helper):
     assert helper.balance_parentheses("shell echo a\\b") == '((shell "echo a\\\\b"))'
 
 
+def test_dynamic_two_argument_command_parses_plain_tokens(helper):
+    helper.add_llm_command(
+        "dispose-subagent-session", "session_id_in_quotes purge_true_or_false"
+    )
+    try:
+        assert helper.balance_parentheses(
+            "dispose-subagent-session ses-example false"
+        ) == '((dispose-subagent-session "ses-example" "false"))'
+    finally:
+        helper.remove_llm_command("dispose-subagent-session")
+
+
+def test_dynamic_delegation_parses_json_array_and_preserves_context(helper):
+    helper.add_llm_command(
+        "delegate-task-to-subagent",
+        "task_in_quotes capability_in_quotes relevant_context_in_quotes",
+    )
+    try:
+        command = (
+            'delegate-task-to-subagent ["Run sleep 15", "coding", '
+            '{"scope_id":"telegram-timeout-test","budget":{"timeout_seconds":5}}]'
+        )
+        parsed = helper.balance_parentheses(command)
+        assert parsed == (
+            '((delegate-task-to-subagent "Run sleep 15" "coding" '
+            '"{\\"scope_id\\":\\"telegram-timeout-test\\",'
+            '\\"budget\\":{\\"timeout_seconds\\":5}}"))'
+        )
+    finally:
+        helper.remove_llm_command("delegate-task-to-subagent")
+
+
+def test_dynamic_command_rejects_ambiguous_argument_boundaries(helper):
+    helper.add_llm_command(
+        "delegate-task-to-subagent",
+        "task_in_quotes capability_in_quotes relevant_context_in_quotes",
+    )
+    try:
+        parsed = helper.balance_parentheses(
+            "delegate-task-to-subagent Run sleep 15 coding scope=timeout"
+        )
+        assert "INVALID_SKILL_ARGUMENTS" in parsed
+        assert "expects 3 arguments" in parsed
+    finally:
+        helper.remove_llm_command("delegate-task-to-subagent")
+
+
 # --- normalize_string -----------------------------------------------------
 
 def test_normalize_string_decodes_bytes(helper):

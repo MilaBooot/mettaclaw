@@ -65,7 +65,7 @@ source venv/bin/activate
 pytest -s -v mock/test_*_mock.py
 ```
 
-The `LlmMockController`, `CommMockServer`, and the OpenClaw Gateway stub are provided by session-scoped fixtures in `mock/conftest.py`, so all three are started once per pytest session. Expected output: `42 passed`, minus the ones whose optional variables are unset - `test_git_push_to_remote_mock` skips without `OMEGACLAW_GIT_TOKEN`, and the six OpenClaw tests skip without `OMEGACLAW_OPENCLAW_TOKEN` (see "OpenClaw plugin" below).
+The `LlmMockController`, `CommMockServer`, and the OpenClaw Gateway stub are provided by session-scoped fixtures in `mock/conftest.py`, so all three are started once per pytest session. Expected output: `42 passed`, minus the ones whose optional variables are unset - `test_git_push_to_remote_mock` skips without `OMEGACLAW_GIT_TOKEN`, and the six OpenClaw tests skip without `OMEGACLAW_OPENCLAW_TOKEN` (see "OpenClaw plugin" below). If port `18789` is occupied by a live Gateway, set `OMEGACLAW_GATEWAY_PORT` to an unused port in both the container Gateway URL and the pytest environment.
 
 ## 5a. OpenClaw plugin (`test_openclaw_delegate_mock.py`)
 

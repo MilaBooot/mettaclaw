@@ -49,13 +49,14 @@ _seq = 0
 class OpenClawError(RuntimeError):
     """Base error raised by the OpenClaw bridge."""
 
-    def __init__(self, msg: str = "OpenClaw Error"):
+    def __init__(self, msg: str = "OpenClaw Error", outcome: str = "failed"):
         """Store the human-readable failure description.
 
         Args:
             msg (str): Message shown to the agent in the skill result.
         """
         self.msg = msg
+        self.outcome = outcome
         super().__init__(msg)
 
 
@@ -270,6 +271,9 @@ def _send_with_startup_retry(
     openclaw_url: str,
     openclaw_agent: str,
     previous_response_id: str | None = None,
+    max_output_tokens: int | None = None,
+    max_tool_calls: int | None = None,
+    timeout_seconds: float = SESSION_TIMEOUT,
 ) -> str:
     """Run one turn, retrying while the Gateway reports it is still starting.
 
@@ -296,6 +300,9 @@ def _send_with_startup_retry(
                 openclaw_url=openclaw_url,
                 openclaw_agent=openclaw_agent,
                 previous_response_id=previous_response_id,
+                max_output_tokens=max_output_tokens,
+                max_tool_calls=max_tool_calls,
+                timeout_seconds=timeout_seconds,
             )
         except OpenClawStartupError as startup_error:
             last_error = startup_error
@@ -315,6 +322,9 @@ def _send(
     openclaw_url: str,
     openclaw_agent: str,
     previous_response_id: str | None = None,
+    max_output_tokens: int | None = None,
+    max_tool_calls: int | None = None,
+    timeout_seconds: float = SESSION_TIMEOUT,
 ) -> str:
     """Post one agent turn to the Gateway and return the result.
 
@@ -346,16 +356,27 @@ def _send(
             }
             if previous_response_id:
                 payload["previous_response_id"] = previous_response_id
+            if max_output_tokens is not None:
+                payload["max_output_tokens"] = int(max_output_tokens)
+            if max_tool_calls is not None:
+                # OpenClaw currently accepts this OpenResponses field but
+                # ignores it. Carry it for backend-contract compatibility;
+                # the agent's server-side policy remains the enforcement layer.
+                payload["max_tool_calls"] = int(max_tool_calls)
             response = session.post(
                 url=endpoint,
                 json=payload,
                 headers=headers,
-                timeout=SESSION_TIMEOUT,
+                timeout=float(timeout_seconds),
             )
+    except requests.Timeout as request_error:
+        raise OpenClawError(
+            f"OpenClaw Gateway timed out: {request_error}", "timed_out"
+        ) from request_error
     except requests.RequestException as request_error:
         raise OpenClawError(
             f"Cannot reach OpenClaw Gateway: {request_error}"
-        )
+        ) from request_error
     if not response.ok:
         raise _http_error(response)
     return _extract_reply(response.json())
@@ -452,7 +473,16 @@ def _http_error(response: requests.Response) -> OpenClawError:
             )
             retry_after = 1.0
         return OpenClawStartupError(message, retry_after)
-    return OpenClawError(f"HTTP {response.status_code}: {message}")
+    lowered = str(message).lower()
+    if response.status_code in (408, 504) or "timeout" in lowered:
+        outcome = "timed_out"
+    elif "cancel" in lowered:
+        outcome = "cancelled"
+    elif response.status_code in (403, 409, 423, 429):
+        outcome = "blocked"
+    else:
+        outcome = "failed"
+    return OpenClawError(f"HTTP {response.status_code}: {message}", outcome)
 
 
 def _extract_reply(payload: dict) -> str:
@@ -480,6 +510,21 @@ def _extract_reply(payload: dict) -> str:
         if isinstance(fragment, dict) and fragment.get("type") == "output_text"
     ]
     reply = "\n".join(text for text in texts if text.strip()).strip()
+    response_status = str(payload.get("status", "completed")).lower()
+    if response_status in {"cancelled", "canceled", "blocked", "failed"}:
+        return json.dumps({
+            "status": response_status,
+            "responseId": payload.get("id"),
+            "message": reply or str(payload.get("error") or response_status),
+        }, ensure_ascii=False)
+    if response_status == "incomplete":
+        reason = str((payload.get("incomplete_details") or {}).get("reason", ""))
+        status = "timed_out" if "timeout" in reason else "blocked"
+        return json.dumps({
+            "status": status,
+            "responseId": payload.get("id"),
+            "message": reply or f"OpenClaw response incomplete: {reason or 'unknown'}",
+        }, ensure_ascii=False)
     if not reply:
         raise OpenClawError(
             f"OpenClaw returned no textual reply; keys={sorted(payload)}"

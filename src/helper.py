@@ -38,10 +38,18 @@ TWO_ARG_COMMANDS = {
     "append-file",
     "write-file-b64"
 }
+LLM_COMMAND_ARITIES = {}
 
 
-def add_llm_command(command):
-    LLM_COMMANDS.add(str(command))
+def add_llm_command(command, arguments=None):
+    """Register a dynamic command and the arity advertised by its skill."""
+    command = str(command)
+    argument_names = (
+        ["argument"] if arguments is None
+        else str(arguments).strip().strip('"').split()
+    )
+    LLM_COMMANDS.add(command)
+    LLM_COMMAND_ARITIES[command] = len(argument_names)
     return True
 
 
@@ -49,6 +57,7 @@ def remove_llm_command(command):
     command = str(command)
     if command not in STATIC_LLM_COMMANDS:
         LLM_COMMANDS.discard(command)
+        LLM_COMMAND_ARITIES.pop(command, None)
     return True
 
 def extract_timestamp(line):
@@ -96,6 +105,53 @@ def quote_arg(x):
         return x
     else:
         return json.dumps(x, ensure_ascii=False)
+
+
+def _dynamic_arguments(rest, arity):
+    """Parse an unambiguous dynamic-skill argument list.
+
+    A JSON array is the preferred transport because one of its values can be a
+    nested context object without quote-boundary ambiguity. Individually JSON-
+    quoted values and plain single-token values remain supported.
+    """
+    if arity == 0:
+        return [] if not rest else None
+
+    try:
+        envelope = json.loads(rest)
+    except (TypeError, ValueError):
+        envelope = None
+    if isinstance(envelope, list):
+        return envelope if len(envelope) == arity else None
+
+    decoder = json.JSONDecoder()
+    values = []
+    index = 0
+    while index < len(rest):
+        while index < len(rest) and rest[index].isspace():
+            index += 1
+        if index >= len(rest):
+            break
+        if rest[index] in '"[{':
+            try:
+                value, end = decoder.raw_decode(rest, index)
+            except ValueError:
+                return None
+            values.append(value)
+            index = end
+        else:
+            end = index
+            while end < len(rest) and not rest[end].isspace():
+                end += 1
+            values.append(rest[index:end])
+            index = end
+    return values if len(values) == arity else None
+
+
+def _quote_dynamic_argument(value):
+    if not isinstance(value, str):
+        value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return quote_arg(value)
 
 def starts_command_line(line):
     s = line.lstrip()
@@ -151,6 +207,23 @@ def balance_parentheses(s):
             # Do not let model commentary become a MeTTa expression.  The
             # loop turns this into ALERT_FAILED feedback for the next turn.
             sexprs.append(f"(Error UNKNOWN_SKILL_CALL {quote_arg(line)})")
+            continue
+        if cmd in LLM_COMMAND_ARITIES:
+            arity = LLM_COMMAND_ARITIES[cmd]
+            arguments = _dynamic_arguments(rest, arity)
+            if arguments is None:
+                message = (
+                    f"{cmd} expects {arity} arguments; for multiple arguments "
+                    "pass one JSON array after the command name"
+                )
+                sexprs.append(
+                    f"(Error INVALID_SKILL_ARGUMENTS {quote_arg(message)})"
+                )
+            else:
+                rendered = " ".join(
+                    _quote_dynamic_argument(value) for value in arguments
+                )
+                sexprs.append(f"({cmd}{' ' if rendered else ''}{rendered})")
             continue
         if cmd in TWO_ARG_COMMANDS:
             if not rest:
