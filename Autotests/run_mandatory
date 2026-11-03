@@ -18,6 +18,7 @@ mock/test_memory_history_mock.py
 mock/test_memory_missing_history_file_mock.py
 mock/test_memory_pin_window_visibility_mock.py
 mock/test_openclaw_delegate_mock.py
+mock/test_subagent_sessions_mock.py
 mock/test_pin_invisible_within_iteration_mock.py
 mock/test_policy_resolve_mock.py
 mock/test_prompt_missing_files_mock.py
@@ -48,3 +49,4 @@ unit/test_openclaw_unit.py
 unit/test_nginx_llm_timeouts.py
 unit/test_llm_timeout_message.py
 import_knowledge/test_import_knowledge.py
+unit/test_subagents_unit.py

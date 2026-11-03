@@ -73,7 +73,9 @@ FROM builder AS versioned-source
 
 WORKDIR /omega-source
 COPY . .
-RUN : > /tmp/omega-ignored-tracked \
+RUN find . -type f \( -name '*.sh' -o -path './scripts/omegaclaw' -o -path './Autotests/run_mandatory' \) \
+       -exec sed -i 's/\r$//' {} + \
+  && : > /tmp/omega-ignored-tracked \
  && if [ -e .git ] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
       git ls-files -ci --exclude-from=.dockerignore -z > /tmp/omega-ignored-tracked; \
       git checkout-index --force --stdin -z < /tmp/omega-ignored-tracked; \
@@ -123,7 +125,7 @@ RUN usermod -a -G tty www-data
 RUN mkdir /opt/nginx
 RUN chown www-data:www-data /opt/nginx
 RUN chmod 0700 /opt/nginx
-COPY --chown=www-data:www-data --chmod=0600 ./proxy/* /opt/nginx/
+COPY --from=versioned-source --chown=www-data:www-data --chmod=0600 /omega-source/proxy/* /opt/nginx/
 
 ENV OMEGA_DIR=/PeTTa/repos/Omega
 ENV MEMORY_DIR=${OMEGA_DIR}/memory
