@@ -8,10 +8,11 @@ continuation state stay in the SQLite store and OpenClaw session respectively.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass, field, replace
+from datetime import datetime, timedelta, timezone
 import json
 import logging
+import os
 from pathlib import Path
 import sqlite3
 import threading
@@ -22,6 +23,17 @@ from uuid import uuid4
 logger = logging.getLogger(__name__)
 MAX_IN_FLIGHT = 5
 MAX_RESULT_CHARS = 4000
+MAX_CONTEXT_CHARS = 16000
+MAX_OUTPUT_TOKENS = 4000
+MAX_TOOL_CALLS = 20
+MAX_TIMEOUT_SECONDS = 600
+DEFAULT_OUTPUT_TOKENS = 2000
+DEFAULT_TOOL_CALLS = 12
+DEFAULT_TIMEOUT_SECONDS = 300
+OUTBOX_LEASE_SECONDS = 300
+RESULT_STATUSES = frozenset({
+    "completed", "failed", "cancelled", "blocked", "timed_out",
+})
 
 
 class SubagentError(RuntimeError):
@@ -38,6 +50,68 @@ class ToolPermissionError(SubagentError):
 
 class SessionError(SubagentError):
     """Raised for an unknown session or an invalid session/agent pairing."""
+
+
+class SessionBusyError(SessionError):
+    """Raised when a session already has a running invocation."""
+
+
+class SessionDisposedError(SessionError):
+    """Raised when an operation targets a disposed session."""
+
+
+class BudgetExceededError(SubagentError):
+    """Raised before execution when a bounded request exceeds policy."""
+
+
+@dataclass(frozen=True)
+class ExecutionBudget:
+    """Per-run limits carried through every executor implementation."""
+
+    max_context_chars: int = MAX_CONTEXT_CHARS
+    max_output_tokens: int = DEFAULT_OUTPUT_TOKENS
+    max_tool_calls: int = DEFAULT_TOOL_CALLS
+    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
+
+    @classmethod
+    def from_input(cls, value: Any = None) -> "ExecutionBudget":
+        if value is None:
+            return cls()
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, Mapping):
+            raise BudgetExceededError("budget must be a JSON object")
+
+        def bounded(name: str, default: int, ceiling: int) -> int:
+            raw = value.get(name, default)
+            if isinstance(raw, bool):
+                raise BudgetExceededError(f"{name} must be a positive integer")
+            try:
+                number = int(raw)
+            except (TypeError, ValueError) as exc:
+                raise BudgetExceededError(
+                    f"{name} must be a positive integer"
+                ) from exc
+            if number < 1 or number > ceiling:
+                raise BudgetExceededError(
+                    f"{name} must be between 1 and {ceiling}"
+                )
+            return number
+
+        return cls(
+            max_context_chars=bounded(
+                "max_context_chars", MAX_CONTEXT_CHARS, MAX_CONTEXT_CHARS
+            ),
+            max_output_tokens=bounded(
+                "max_output_tokens", DEFAULT_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS
+            ),
+            max_tool_calls=bounded(
+                "max_tool_calls", DEFAULT_TOOL_CALLS, MAX_TOOL_CALLS
+            ),
+            timeout_seconds=bounded(
+                "timeout_seconds", DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -61,19 +135,23 @@ class ContextProjection:
     expected_output: str = ""
     evaluation_criteria: tuple[str, ...] = ()
     requested_tools: tuple[str, ...] = ()
+    scope_id: str = "default"
+    budget: ExecutionBudget = field(default_factory=ExecutionBudget)
 
     @classmethod
     def from_input(cls, goal: str, value: Any = None) -> "ContextProjection":
         if isinstance(value, cls):
-            return cls(goal=goal, **{k: v for k, v in asdict(value).items() if k != "goal"})
+            return replace(value, goal=str(goal).strip())
         payload: Any = value
         if isinstance(value, str):
             stripped = value.strip()
             if stripped.startswith("{"):
                 try:
                     payload = json.loads(stripped)
-                except ValueError:
-                    payload = {"context": value}
+                except ValueError as exc:
+                    raise SubagentError(
+                        "structured context must be a valid JSON object"
+                    ) from exc
             else:
                 payload = {"context": value}
         if payload is None:
@@ -96,9 +174,13 @@ class ContextProjection:
             expected_output=str(payload.get("expected_output", "")).strip(),
             evaluation_criteria=strings("evaluation_criteria"),
             requested_tools=strings("requested_tools"),
+            scope_id=str(payload.get("scope_id", "default")).strip() or "default",
+            budget=ExecutionBudget.from_input(payload.get("budget")),
         )
 
-    def render(self, definition: SubagentDefinition) -> str:
+    def render(
+        self, definition: SubagentDefinition, resolved_tools: Sequence[str]
+    ) -> str:
         sections = [
             ("ROLE", f"{definition.name}: {definition.instructions}"),
             ("GOAL", self.goal),
@@ -108,7 +190,13 @@ class ContextProjection:
             ("ARTIFACTS / REFERENCES", "\n".join(f"- {item}" for item in self.artifacts)),
             ("EXPECTED OUTPUT", self.expected_output),
             ("EVALUATION CRITERIA", "\n".join(f"- {item}" for item in self.evaluation_criteria)),
-            ("ALLOWED TOOL CATEGORIES", ", ".join(sorted(definition.allowed_tools))),
+            ("ALLOWED TOOL CATEGORIES", ", ".join(resolved_tools)),
+            (
+                "EXECUTION BUDGET",
+                f"output_tokens={self.budget.max_output_tokens}, "
+                f"tool_calls={self.budget.max_tool_calls}, "
+                f"timeout_seconds={self.budget.timeout_seconds}",
+            ),
         ]
         body = "\n\n".join(f"{title}\n{text}" for title, text in sections if text)
         return (
@@ -259,13 +347,15 @@ class SessionStore:
                 CREATE TABLE IF NOT EXISTS subagent_sessions (
                     session_id TEXT PRIMARY KEY,
                     agent_id TEXT NOT NULL,
+                    scope_id TEXT NOT NULL DEFAULT 'default',
                     title TEXT NOT NULL,
                     status TEXT NOT NULL,
                     summary TEXT NOT NULL DEFAULT '',
                     backend_response_id TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    closed_at TEXT
+                    closed_at TEXT,
+                    disposed_at TEXT
                 );
                 CREATE TABLE IF NOT EXISTS subagent_runs (
                     run_id TEXT PRIMARY KEY,
@@ -290,16 +380,48 @@ class SessionStore:
                     ON subagent_runs(session_id, started_at);
                 CREATE INDEX IF NOT EXISTS idx_subagent_messages_session
                     ON subagent_messages(session_id, created_at);
+                CREATE TABLE IF NOT EXISTS subagent_outbox (
+                    delivery_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    lease_until TEXT,
+                    acknowledged_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_subagent_outbox_pending
+                    ON subagent_outbox(state, created_at);
             """)
+            self._ensure_column(
+                db, "subagent_sessions", "scope_id",
+                "TEXT NOT NULL DEFAULT 'default'",
+            )
+            self._ensure_column(
+                db, "subagent_sessions", "disposed_at", "TEXT"
+            )
 
-    def create_session(self, agent_id: str, title: str) -> str:
+    @staticmethod
+    def _ensure_column(
+        db: sqlite3.Connection, table: str, name: str, declaration: str
+    ) -> None:
+        columns = {
+            row["name"] for row in db.execute(f"PRAGMA table_info({table})")
+        }
+        if name not in columns:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+
+    def create_session(
+        self, agent_id: str, title: str, scope_id: str = "default"
+    ) -> str:
         session_id, now = f"ses-{uuid4().hex}", _now()
         with self._connect() as db:
             db.execute(
                 "INSERT INTO subagent_sessions "
-                "(session_id, agent_id, title, status, created_at, updated_at) "
-                "VALUES (?, ?, ?, 'active', ?, ?)",
-                (session_id, agent_id, title[:200], now, now),
+                "(session_id, agent_id, scope_id, title, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, 'active', ?, ?)",
+                (session_id, agent_id, scope_id, title[:200], now, now),
             )
         return session_id
 
@@ -315,6 +437,26 @@ class SessionStore:
     def create_run(self, session_id: str, goal: str) -> str:
         run_id, now = f"run-{uuid4().hex}", _now()
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            session = db.execute(
+                "SELECT status FROM subagent_sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if session is None:
+                raise SessionError(f"unknown subagent session: {session_id}")
+            if session["status"] == "disposed":
+                raise SessionDisposedError(
+                    f"subagent session is disposed: {session_id}"
+                )
+            running = db.execute(
+                "SELECT run_id FROM subagent_runs "
+                "WHERE session_id = ? AND status = 'running' LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            if running is not None:
+                raise SessionBusyError(
+                    f"session {session_id} already has running run {running['run_id']}"
+                )
             db.execute(
                 "INSERT INTO subagent_runs (run_id, session_id, goal, status, started_at) "
                 "VALUES (?, ?, ?, 'running', ?)",
@@ -348,20 +490,38 @@ class SessionStore:
         summary: str,
         backend_response_id: str | None = None,
         error: str | None = None,
-    ) -> None:
+        delivery_payload: str | None = None,
+    ) -> str | None:
+        if status not in RESULT_STATUSES:
+            raise SubagentError(f"unsupported terminal status: {status}")
         now = _now()
+        delivery_id = f"delivery-{uuid4().hex}" if delivery_payload else None
         with self._connect() as db:
-            db.execute(
+            db.execute("BEGIN IMMEDIATE")
+            updated = db.execute(
                 "UPDATE subagent_runs SET status = ?, ended_at = ?, result_summary = ?, error = ? "
-                "WHERE run_id = ? AND session_id = ?",
+                "WHERE run_id = ? AND session_id = ? AND status = 'running'",
                 (status, now, summary, error, run_id, session_id),
             )
+            if updated.rowcount != 1:
+                raise SessionError(
+                    f"run is not active: {run_id} in session {session_id}"
+                )
             db.execute(
                 "UPDATE subagent_sessions SET status = ?, summary = ?, "
                 "backend_response_id = COALESCE(?, backend_response_id), updated_at = ?, closed_at = ? "
                 "WHERE session_id = ?",
                 (status, summary, backend_response_id, now, now, session_id),
             )
+            if delivery_id:
+                payload = f"{delivery_payload} delivery={delivery_id}"
+                db.execute(
+                    "INSERT INTO subagent_outbox "
+                    "(delivery_id, session_id, run_id, payload, state, created_at) "
+                    "VALUES (?, ?, ?, ?, 'pending', ?)",
+                    (delivery_id, session_id, run_id, payload, now),
+                )
+        return delivery_id
 
     def list_runs(self, session_id: str) -> list[dict[str, Any]]:
         with self._connect() as db:
@@ -377,6 +537,120 @@ class SessionStore:
                 (session_id,),
             )]
 
+    def dispose_session(self, session_id: str, purge: bool = False) -> dict[str, Any]:
+        """Revoke continuation and remove private context, or purge all state."""
+        now = _now()
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            session = db.execute(
+                "SELECT * FROM subagent_sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+            if session is None:
+                raise SessionError(f"unknown subagent session: {session_id}")
+            running = db.execute(
+                "SELECT run_id FROM subagent_runs "
+                "WHERE session_id = ? AND status = 'running' LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            if running is not None:
+                raise SessionBusyError(
+                    f"cannot dispose session {session_id} while run "
+                    f"{running['run_id']} is active"
+                )
+            db.execute("DELETE FROM subagent_outbox WHERE session_id = ?", (session_id,))
+            db.execute("DELETE FROM subagent_messages WHERE session_id = ?", (session_id,))
+            if purge:
+                db.execute("DELETE FROM subagent_runs WHERE session_id = ?", (session_id,))
+                db.execute("DELETE FROM subagent_sessions WHERE session_id = ?", (session_id,))
+                return {"session_id": session_id, "status": "purged"}
+            db.execute(
+                "UPDATE subagent_sessions SET status = 'disposed', summary = '', "
+                "backend_response_id = NULL, updated_at = ?, closed_at = ?, disposed_at = ? "
+                "WHERE session_id = ?",
+                (now, now, now, session_id),
+            )
+        return {"session_id": session_id, "status": "disposed"}
+
+    def dispose_scope(self, scope_id: str, purge: bool = True) -> dict[str, Any]:
+        """Dispose every idle session owned by one workflow or space."""
+        with self._connect() as db:
+            session_ids = [
+                row["session_id"] for row in db.execute(
+                    "SELECT session_id FROM subagent_sessions WHERE scope_id = ?",
+                    (scope_id,),
+                )
+            ]
+        disposed = []
+        busy = []
+        for session_id in session_ids:
+            try:
+                disposed.append(self.dispose_session(session_id, purge=purge))
+            except SessionBusyError:
+                busy.append(session_id)
+        return {
+            "scope_id": scope_id,
+            "status": "ok" if not busy else "partial",
+            "disposed": disposed,
+            "busy_session_ids": busy,
+        }
+
+    def lease_completed(self, limit: int = 20) -> list[dict[str, Any]]:
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat()
+        lease_until = (now + timedelta(seconds=OUTBOX_LEASE_SECONDS)).isoformat()
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "UPDATE subagent_outbox SET state = 'pending', lease_until = NULL "
+                "WHERE state = 'leased' AND lease_until < ?",
+                (now_text,),
+            )
+            rows = list(db.execute(
+                "SELECT * FROM subagent_outbox WHERE state = 'pending' "
+                "ORDER BY created_at, delivery_id LIMIT ?",
+                (max(1, min(int(limit), 100)),),
+            ))
+            ids = [row["delivery_id"] for row in rows]
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                db.execute(
+                    f"UPDATE subagent_outbox SET state = 'leased', attempts = attempts + 1, "
+                    f"lease_until = ? WHERE delivery_id IN ({placeholders})",
+                    (lease_until, *ids),
+                )
+        return [dict(row) for row in rows]
+
+    def acknowledge_completed(self, delivery_ids: Sequence[str]) -> None:
+        ids = [str(item) for item in delivery_ids if str(item)]
+        if not ids:
+            return
+        placeholders = ",".join("?" for _ in ids)
+        with self._connect() as db:
+            db.execute(
+                f"UPDATE subagent_outbox SET state = 'acknowledged', "
+                f"acknowledged_at = ?, lease_until = NULL "
+                f"WHERE delivery_id IN ({placeholders}) AND state = 'leased'",
+                (_now(), *ids),
+            )
+
+    def release_completed(self, delivery_ids: Sequence[str]) -> None:
+        ids = [str(item) for item in delivery_ids if str(item)]
+        if not ids:
+            return
+        placeholders = ",".join("?" for _ in ids)
+        with self._connect() as db:
+            db.execute(
+                f"UPDATE subagent_outbox SET state = 'pending', lease_until = NULL "
+                f"WHERE delivery_id IN ({placeholders}) AND state = 'leased'",
+                tuple(ids),
+            )
+
+    def list_outbox(self) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT * FROM subagent_outbox ORDER BY created_at, delivery_id"
+            )]
+
 
 @dataclass(frozen=True)
 class PreparedRun:
@@ -386,6 +660,8 @@ class PreparedRun:
     run_id: str
     prompt: str
     previous_response_id: str | None
+    resolved_tools: tuple[str, ...]
+    budget: ExecutionBudget
 
 
 class OpenClawExecutor:
@@ -395,12 +671,25 @@ class OpenClawExecutor:
     def __call__(self, prepared: PreparedRun) -> Mapping[str, Any]:
         import openclaw
 
-        raw = openclaw._send_with_startup_retry(
-            message=prepared.prompt,
-            openclaw_url=self.openclaw_url,
-            openclaw_agent=prepared.definition.backend_agent_id,
-            previous_response_id=prepared.previous_response_id,
-        )
+        if not set(prepared.resolved_tools).issubset(
+            prepared.definition.allowed_tools
+        ):
+            raise ToolPermissionError("executor received tools outside its policy")
+        try:
+            raw = openclaw._send_with_startup_retry(
+                message=prepared.prompt,
+                openclaw_url=self.openclaw_url,
+                openclaw_agent=prepared.definition.backend_agent_id,
+                previous_response_id=prepared.previous_response_id,
+                max_output_tokens=prepared.budget.max_output_tokens,
+                max_tool_calls=prepared.budget.max_tool_calls,
+                timeout_seconds=prepared.budget.timeout_seconds,
+            )
+        except openclaw.OpenClawError as exc:
+            return {
+                "status": getattr(exc, "outcome", "failed"),
+                "message": str(exc),
+            }
         return json.loads(raw)
 
 
@@ -438,11 +727,20 @@ class SubagentRuntime:
             previous_response_id = session["backend_response_id"]
         else:
             definition = self.registry.select(capability, goal, agent_id)
-        ToolResolver.resolve(definition, projection.requested_tools)
+        resolved_tools = ToolResolver.resolve(
+            definition, projection.requested_tools
+        )
+        prompt = projection.render(definition, resolved_tools)
+        if len(prompt) > projection.budget.max_context_chars:
+            raise BudgetExceededError(
+                f"projected context is {len(prompt)} characters; maximum is "
+                f"{projection.budget.max_context_chars}"
+            )
         if not session_id:
-            session_id = self.store.create_session(definition.id, goal)
+            session_id = self.store.create_session(
+                definition.id, goal, projection.scope_id
+            )
         run_id = self.store.create_run(session_id, goal)
-        prompt = projection.render(definition)
         self.store.add_message(session_id, run_id, "user", "context_projection", prompt)
         logger.info(
             "Subagent run prepared agent=%s session=%s run=%s resumed=%s",
@@ -452,14 +750,42 @@ class SubagentRuntime:
             previous_response_id is not None,
         )
         return PreparedRun(
-            definition, projection, session_id, run_id, prompt, previous_response_id
+            definition,
+            projection,
+            session_id,
+            run_id,
+            prompt,
+            previous_response_id,
+            resolved_tools,
+            projection.budget,
         )
 
     def execute(self, prepared: PreparedRun) -> SubagentResult:
         try:
             backend = dict(self.executor(prepared))
-            if backend.get("status") not in ("ok", "completed"):
-                raise SubagentError(str(backend.get("message") or "worker failed"))
+            backend_status = _normalise_status(backend.get("status", "failed"))
+            if backend_status not in ("ok", "completed"):
+                summary = str(
+                    backend.get("message") or f"Subagent run {backend_status}."
+                ).strip()[:MAX_RESULT_CHARS]
+                status = backend_status if backend_status in RESULT_STATUSES else "failed"
+                result = SubagentResult(
+                    agent_id=prepared.definition.id,
+                    session_id=prepared.session_id,
+                    run_id=prepared.run_id,
+                    status=status,
+                    summary=summary,
+                    error=summary if status != "cancelled" else None,
+                )
+                self.store.finish(
+                    prepared.session_id,
+                    prepared.run_id,
+                    result.status,
+                    result.summary,
+                    error=result.error,
+                    delivery_payload=_render_result(result),
+                )
+                return result
             reply = str(backend.get("reply", "")).strip()
             if not reply:
                 raise SubagentError("worker returned an empty result")
@@ -474,6 +800,7 @@ class SubagentRuntime:
                 result.summary,
                 str(backend.get("responseId") or "") or None,
                 result.error,
+                delivery_payload=_render_result(result),
             )
             return result
         except Exception as exc:
@@ -490,7 +817,12 @@ class SubagentRuntime:
                 prepared.session_id, prepared.run_id, "system", "error", error
             )
             self.store.finish(
-                prepared.session_id, prepared.run_id, "failed", result.summary, error=error
+                prepared.session_id,
+                prepared.run_id,
+                "failed",
+                result.summary,
+                error=error,
+                delivery_payload=_render_result(result),
             )
             return result
 
@@ -499,7 +831,6 @@ class SubagentRuntime:
 
 
 _lock = threading.Lock()
-_completed: list[str] = []
 _in_flight = 0
 
 
@@ -576,7 +907,7 @@ def inspect_session(session_id: str, store_path: str) -> str:
         key: session[key]
         for key in (
             "session_id", "agent_id", "title", "status", "summary",
-            "created_at", "updated_at", "closed_at",
+            "scope_id", "created_at", "updated_at", "closed_at", "disposed_at",
         )
     }
     visible_runs = [
@@ -597,21 +928,42 @@ def inspect_session(session_id: str, store_path: str) -> str:
     }, ensure_ascii=False)
 
 
+def dispose_session(session_id: str, purge: Any, store_path: str) -> str:
+    """Dispose or purge one session without exposing retained private state."""
+    try:
+        result = SessionStore(store_path).dispose_session(
+            str(session_id).strip(), purge=_as_bool(purge)
+        )
+        return json.dumps({"status": "ok", "result": result}, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({
+            "status": "error", "type": "session_error", "message": str(exc)
+        }, ensure_ascii=False)
+
+
+def dispose_scope(scope_id: str, purge: Any, store_path: str) -> str:
+    """Dispose every session owned by a workflow/space scope."""
+    try:
+        return json.dumps(
+            SessionStore(store_path).dispose_scope(
+                str(scope_id).strip(), purge=_as_bool(purge)
+            ),
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        return json.dumps({
+            "status": "error", "type": "scope_error", "message": str(exc)
+        }, ensure_ascii=False)
+
+
 def _worker(runtime: SubagentRuntime, prepared: PreparedRun) -> None:
     global _in_flight
     try:
-        record = _render_result(runtime.execute(prepared))
+        runtime.execute(prepared)
     except Exception as exc:
         logger.exception("Subagent worker crashed: %s", exc)
-        record = (
-            f"SUBAGENT_RESULT agent={prepared.definition.id} "
-            f"session={prepared.session_id} run={prepared.run_id} status=failed "
-            f"error={_flatten(exc, 800)}"
-        )
     finally:
         with _lock:
-            if 'record' in locals():
-                _completed.append(record)
             _in_flight -= 1
         logger.info(
             "Subagent run finished agent=%s session=%s run=%s",
@@ -621,11 +973,32 @@ def _worker(runtime: SubagentRuntime, prepared: PreparedRun) -> None:
         )
 
 
-def take_completed() -> str:
-    global _completed
-    with _lock:
-        records, _completed = _completed, []
-    return "\n".join(records)
+def deliver_completed(store_path: str, history_path: str) -> str:
+    """Append leased results durably, then acknowledge their delivery."""
+    store = SessionStore(store_path)
+    records = store.lease_completed()
+    if not records:
+        return "0"
+    delivery_ids = [record["delivery_id"] for record in records]
+    path = Path(history_path).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        additions = []
+        for record in records:
+            marker = f"delivery={record['delivery_id']}"
+            if marker not in existing:
+                additions.append(f"{_now()}\n{record['payload']}\n")
+        if additions:
+            with path.open("a", encoding="utf-8", newline="\n") as stream:
+                stream.write("".join(additions))
+                stream.flush()
+                os.fsync(stream.fileno())
+        store.acknowledge_completed(delivery_ids)
+        return str(len(records))
+    except Exception:
+        store.release_completed(delivery_ids)
+        raise
 
 
 def _parse_result(prepared: PreparedRun, reply: str) -> SubagentResult:
@@ -646,8 +1019,9 @@ def _parse_result(prepared: PreparedRun, reply: str) -> SubagentResult:
             return (value,) if value.strip() else ()
         return tuple(str(item) for item in value or ())
 
-    status = str(payload.get("status", "completed")).lower()
-    status = "failed" if status in {"error", "failed"} else "completed"
+    status = _normalise_status(payload.get("status", "completed"))
+    if status not in RESULT_STATUSES:
+        status = "failed"
     summary = str(payload.get("summary") or reply).strip()[:MAX_RESULT_CHARS]
     error = str(payload.get("error", "")).strip() or None
     return SubagentResult(
@@ -680,6 +1054,11 @@ def _render_result(result: SubagentResult) -> str:
         fields.append(f"evidence={_flatten(' | '.join(result.evidence), 800)}")
     if result.error:
         fields.append(f"error={_flatten(result.error, 800)}")
+    if result.status == "timed_out":
+        fields.extend((
+            "retryable=true",
+            "next_action=inspect_partial_effects_then_retry_with_a_smaller_task",
+        ))
     return " ".join(fields)
 
 
@@ -689,6 +1068,29 @@ def _flatten(value: Any, limit: int) -> str:
 
 def _normalise(value: str) -> str:
     return " ".join(str(value).lower().replace("-", " ").replace("_", " ").split())
+
+
+def _normalise_status(value: Any) -> str:
+    status = str(value).strip().lower().replace("-", "_")
+    aliases = {
+        "ok": "ok",
+        "complete": "completed",
+        "completed": "completed",
+        "error": "failed",
+        "failed": "failed",
+        "cancelled": "cancelled",
+        "canceled": "cancelled",
+        "blocked": "blocked",
+        "timeout": "timed_out",
+        "timed_out": "timed_out",
+    }
+    return aliases.get(status, status)
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "purge"}
 
 
 def _now() -> str:

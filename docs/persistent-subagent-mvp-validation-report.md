@@ -132,14 +132,97 @@ unbounded coordinator history.
 - Selection is deterministic rather than learned or LLM-ranked.
 - OpenClaw is the only real worker executor currently implemented.
 - In-flight worker threads do not survive an Omega container restart.
-- Same-session concurrency protection and durable job recovery are not yet
-  implemented.
+- Same-session overlap is rejected atomically, and completed results use a
+  leased/acknowledged SQLite outbox. Recovery of a run that was still executing
+  when the process died is not yet implemented.
 - Searchable history, advanced ranking, child-to-child messaging, and
   recursive delegation are intentionally outside this MVP.
-- Tool categories exist in Omega's definitions, but production deployments
-  must also enforce matching allow/deny policies in the worker runtime.
+- Resolved tool subsets and execution budgets remain part of the prepared run.
+  Context and timeout limits are enforced locally, while production
+  deployments must also enforce matching allow/deny policies in the worker
+  runtime. OpenClaw does not currently enforce exact per-request tool-call
+  counts.
+- Session and scope disposal are available explicitly. Workflow/space teardown
+  must invoke scope cleanup until Omega exposes a generic plugin lifecycle
+  event.
 - The channel reports accepted and completed states, not private chain-of-
   thought or every internal worker action.
+
+## Reviewer hardening update (2026-10-26)
+
+The follow-up implementation addresses the review findings as follows:
+
+| Finding | Current handling |
+| --- | --- |
+| Session disposal | Idle sessions can be disposed or purged; scope cleanup handles workflow-owned sessions and refuses active ones |
+| Tool restrictions | The resolved subset is retained in the prepared run/prompt and checked again by the executor; OpenClaw agent policy performs actual tool authorization |
+| Completion outcomes | `completed`, `failed`, `cancelled`, `blocked`, and `timed_out` remain distinct through transport, storage, inspection, and delivery |
+| Session concurrency | `BEGIN IMMEDIATE` serializes run creation and rejects a second running invocation for the same session |
+| Result delivery | Completion and outbox insertion share one transaction; delivery uses leases, durable flush, acknowledgement, and idempotence markers |
+| Execution bounds | Context, output-token, tool-call, and timeout ceilings are carried by the runtime; OpenClaw's exact tool-call enforcement remains a documented adapter limitation |
+
+These changes are covered by focused unit tests, including legacy database
+migration, and by deterministic Docker integration tests. The hardened patch
+has also been revalidated through Telegram, OpenRouter, and a real OpenClaw
+gateway.
+
+## Hardening progress report (updated 2026-10-29)
+
+> **OpenClaw remains only the MVP worker-execution adapter used to validate the
+> architecture. Omega owns capability selection, bounded context, persistence,
+> lifecycle, execution budgets, and structured results. OpenClaw is not a
+> mandatory Omega core dependency and can be replaced behind the executor
+> interface.**
+
+The reviewer feedback has been incorporated into the MVP as follows:
+
+- Added explicit session and workflow-scope disposal, with safe refusal while
+  a session has active work.
+- Preserved and rechecked resolved tool restrictions, and documented where the
+  OpenClaw adapter must enforce its matching allow/deny policy.
+- Preserved `completed`, `failed`, `cancelled`, `blocked`, and `timed_out`
+  outcomes instead of converting every terminal state to `completed`.
+- Added transactional same-session concurrency protection so overlapping runs
+  cannot create misleading session state.
+- Replaced the in-memory completion queue with a durable SQLite outbox using
+  leases, acknowledgements, retries, durable flushing, and idempotence markers.
+- Added bounded context, output-token, tool-call, and execution-time settings.
+  The default timeout is 300 seconds and the configured ceiling is 600 seconds.
+- Added timeout feedback for the coordinator: timed-out work is recorded as
+  `timed_out`, marked retryable, and returned with guidance to inspect partial
+  effects before retrying a smaller task. Automatic blind retry is deliberately
+  not enabled.
+- Improved database migration, channel-visible lifecycle reporting, test
+  reliability, and adapter documentation.
+- Fixed Omega's generic dynamic-skill boundary with a small arity-aware parser
+  change. Multi-argument skills now accept an unambiguous JSON-array envelope,
+  nested context objects reach the plugin as valid JSON, and malformed
+  structured context is rejected instead of silently falling back to text.
+
+### Hardening validation status
+
+| Check | Result |
+| --- | --- |
+| Unit test suite | **106 passed** |
+| Deterministic Docker integration | **2 passed** (delegation/resume plus parser-driven structured context, forced timeout feedback, and scope purge) |
+| Python compilation and Git whitespace checks | **Passed** |
+| Original Telegram/OpenRouter MVP demonstration | **Passed** |
+| Telegram/OpenRouter revalidation of the hardening patch | **Passed** (real OpenRouter model, Telegram channel, and OpenClaw gateway) |
+
+The live validation covered delegation, specialist selection, bounded JSON
+context, timeout handling, durable result acknowledgement, scope cleanup, and
+individual session disposal. For the disposal check, SQLite recorded the
+session as `disposed`, cleared its continuation state and private messages, and
+retained its run metadata as requested. Omega did not emit the final disposal
+confirmation to Telegram after the successful tool result; this is a
+non-blocking channel acknowledgement UX issue rather than a persistence or
+lifecycle failure.
+
+Remaining work for the next architecture phase includes a native Omega worker
+backend, exact backend-level enforcement of per-request tool-call limits,
+recovery/reconciliation of runs interrupted by a process crash, and broader
+live-channel testing. Searchable history and improved automatic specialist
+ranking remain follow-up features rather than MVP merge requirements.
 
 ## Next architecture: replaceable worker backends
 
@@ -170,7 +253,7 @@ Recommended implementation order:
    containers with separate prompts, workspaces, and tool policies.
 5. Run the same contract tests against fake, OpenClaw, and native Omega
    executors.
-6. Add durable job recovery and same-session concurrency protection before
+6. Add recovery/reconciliation for runs interrupted while executing before
    enabling broader parallelism.
 
 The native backend is acceptable when it passes the same observable contract:
