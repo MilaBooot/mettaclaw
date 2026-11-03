@@ -1,0 +1,21 @@
+{
+  "id": "omega-tool-budget",
+  "name": "Omega Tool Budget Enforcer",
+  "description": "Enforces Omega per-run tool-call budgets before OpenClaw executes worker tools.",
+  "categories": ["developer-tools"],
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "agentIds": {
+        "type": "array",
+        "items": { "type": "string", "minLength": 1 },
+        "uniqueItems": true,
+        "default": ["research-agent", "coding-agent", "reviewer-agent"]
+      }
+    }
+  }
+}

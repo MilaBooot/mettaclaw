@@ -78,12 +78,39 @@ configured with - the plugin never overrides it.
 For the persistent-subagent skills, configure agents with these exact ids:
 `research-agent`, `coding-agent`, and `reviewer-agent`. Give each a separate
 workspace and an OpenClaw `tools.allow`/`tools.deny` policy matching the table
-above. The HyperClaw runtime rejects explicitly requested tool categories that
+above. The Omega runtime rejects explicitly requested tool categories that
 are outside its definition, while the Gateway policy is the enforcement layer
 for tools the worker can actually invoke. Specialists should not be allowed to
 delegate recursively in this MVP.
 
-### 3. Get the Gateway token
+### 3. Install the required tool-budget enforcer
+
+OpenClaw's OpenResponses endpoint accepts `max_tool_calls` but does not enforce
+it. Persistent workers therefore require the companion native OpenClaw plugin
+in [`tool-budget-enforcer`](./tool-budget-enforcer). It registers a
+`before_tool_call` gate, counts each attempted worker tool call, and blocks the
+`N+1` call before execution. The dedicated Omega worker ids fail closed when a
+run has no valid budget marker.
+
+From the Omega checkout:
+
+```bash
+cd plugins/openclaw/tool-budget-enforcer
+npm test
+openclaw plugins install --link "$PWD" --force
+openclaw plugins enable omega-tool-budget
+openclaw config set plugins.entries.omega-tool-budget.hooks.allowConversationAccess true
+openclaw plugins reload omega-tool-budget
+openclaw plugins inspect omega-tool-budget --runtime --json
+```
+
+The conversation-access grant lets `before_agent_run` read the first-line
+budget marker and bind it to the OpenClaw run. The enforcement hook itself runs
+before every tool. Omega verifies the plugin's authenticated health endpoint
+before submitting any bounded worker request and refuses the run if the plugin
+is absent or incompatible.
+
+### 4. Get the Gateway token
 
 Token auth is the default (`gateway.auth.mode: "token"`). The value lives in
 the Gateway's `.env` as `OPENCLAW_GATEWAY_TOKEN`.
@@ -258,18 +285,20 @@ for context characters, output tokens, tool calls, and elapsed seconds:
 }
 ```
 
-Channel users can request this in ordinary language. Internally, Omega's
-dynamic-skill parser transports multi-argument calls as one JSON array so the
-nested context object cannot be merged with the task or capability argument.
-If text begins like a structured context object but is not valid JSON, the
-delegation is rejected instead of silently using the default scope or budget.
+Channel users can request this in ordinary language. On `dev/experimental`,
+Omega's provider-native structured tool calls keep task, capability, and
+context as separate named parameters. If context begins like a structured
+object but is not valid JSON, delegation is rejected instead of silently using
+the default scope or budget.
 
 The resolved tool subset is retained in the prepared run and worker prompt.
-The OpenClaw adapter forwards token and tool-call limits. OpenClaw currently
-treats `max_output_tokens` as best effort and accepts but does not enforce
-`max_tool_calls`, so its per-agent `tools.allow`/`tools.deny` policy remains
-the security boundary. A future native executor must enforce every budget
-field directly.
+The adapter forwards `max_output_tokens` and `max_tool_calls`, prepends a
+machine-readable budget marker, and verifies the enforcement plugin before the
+worker starts. The OpenClaw plugin binds that marker to the run and blocks tool
+attempts beyond the limit in `before_tool_call`. Per-agent
+`tools.allow`/`tools.deny` remains the authorization boundary for *which* tools
+may run; the budget hook independently limits *how many* may run. A future
+native executor must enforce both contracts directly.
 
 The immediate result identifies the persisted work:
 
@@ -400,6 +429,7 @@ From the repository root:
 ```bash
 python -m pytest Autotests/unit/test_subagents_unit.py \
   Autotests/unit/test_openclaw_unit.py -q
+npm --prefix plugins/openclaw/tool-budget-enforcer test
 ```
 
 These tests require no live Gateway. For a live demo, enable the plugin and
@@ -426,6 +456,8 @@ sqlite3 memory/subagent_sessions.sqlite3 \
 | `Cannot reach OpenClaw Gateway` | Wrong `openClawURL`, or the Gateway is bound to loopback only |
 | `missing scope ... (MISSING_SCOPE)` | The request went to the WebSocket surface instead of `/v1/responses` |
 | `HTTP 504` | The Gateway took longer than the proxy's `proxy_read_timeout` to answer |
+| `tool-budget enforcer is required` | Install/enable `omega-tool-budget`, grant its conversation hook access, and reload the Gateway plugin |
+| Worker tool reports `max_tool_calls exhausted` | The enforced per-run call limit was reached; inspect partial work and submit a new bounded run only if safe |
 | `busy` and no delegation starts | `MAX_IN_FLIGHT` tasks are still running; they clear as the Gateway answers |
 | No `OPENCLAW_RESULT` ever appears | The container restarted mid-flight, or the plugin's heartbeat listener was not registered - check for `openclaw-plugin: OpenClaw integration is enabled` on startup |
 

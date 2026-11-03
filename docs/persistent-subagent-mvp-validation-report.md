@@ -138,10 +138,10 @@ unbounded coordinator history.
 - Searchable history, advanced ranking, child-to-child messaging, and
   recursive delegation are intentionally outside this MVP.
 - Resolved tool subsets and execution budgets remain part of the prepared run.
-  Context and timeout limits are enforced locally, while production
-  deployments must also enforce matching allow/deny policies in the worker
-  runtime. OpenClaw does not currently enforce exact per-request tool-call
-  counts.
+  Context and timeout limits are enforced locally. A required OpenClaw
+  `before_tool_call` policy plugin enforces per-run tool-call counts before
+  execution, while per-agent allow/deny policy controls which tools are
+  authorized.
 - Session and scope disposal are available explicitly. Workflow/space teardown
   must invoke scope cleanup until Omega exposes a generic plugin lifecycle
   event.
@@ -159,7 +159,7 @@ The follow-up implementation addresses the review findings as follows:
 | Completion outcomes | `completed`, `failed`, `cancelled`, `blocked`, and `timed_out` remain distinct through transport, storage, inspection, and delivery |
 | Session concurrency | `BEGIN IMMEDIATE` serializes run creation and rejects a second running invocation for the same session |
 | Result delivery | Completion and outbox insertion share one transaction; delivery uses leases, durable flush, acknowledgement, and idempotence markers |
-| Execution bounds | Context, output-token, tool-call, and timeout ceilings are carried by the runtime; OpenClaw's exact tool-call enforcement remains a documented adapter limitation |
+| Execution bounds | Context, output-token, tool-call, and timeout ceilings are carried by the runtime; a fail-closed OpenClaw hook blocks the `N+1` tool attempt before execution |
 
 These changes are covered by focused unit tests, including legacy database
 migration, and by deterministic Docker integration tests. The hardened patch
@@ -188,23 +188,27 @@ The reviewer feedback has been incorporated into the MVP as follows:
   leases, acknowledgements, retries, durable flushing, and idempotence markers.
 - Added bounded context, output-token, tool-call, and execution-time settings.
   The default timeout is 300 seconds and the configured ceiling is 600 seconds.
+- Added a required worker-side tool-budget extension. Omega verifies its
+  authenticated health contract before starting a bounded run, and the
+  extension counts calls in `before_tool_call` and blocks calls beyond the
+  configured `max_tool_calls` value.
 - Added timeout feedback for the coordinator: timed-out work is recorded as
   `timed_out`, marked retryable, and returned with guidance to inspect partial
   effects before retrying a smaller task. Automatic blind retry is deliberately
   not enabled.
 - Improved database migration, channel-visible lifecycle reporting, test
   reliability, and adapter documentation.
-- Fixed Omega's generic dynamic-skill boundary with a small arity-aware parser
-  change. Multi-argument skills now accept an unambiguous JSON-array envelope,
-  nested context objects reach the plugin as valid JSON, and malformed
-  structured context is rejected instead of silently falling back to text.
+- Rebasing onto `dev/experimental` moved delegation to Omega's provider-native
+  structured tool calls. Task, capability, and context now arrive as separate
+  named parameters without the previous text-command parser change; malformed
+  structured context is still rejected instead of falling back to text.
 
 ### Hardening validation status
 
 | Check | Result |
 | --- | --- |
-| Unit test suite | **106 passed** |
-| Deterministic Docker integration | **2 passed** (delegation/resume plus parser-driven structured context, forced timeout feedback, and scope purge) |
+| Unit test suites | **189 Python tests and 4 worker-extension tests passed** |
+| Deterministic Docker integration | **2 passed before the `dev/experimental` rebase** (delegation/resume plus structured context, forced timeout feedback, and scope purge); rebased image revalidation remains pending because the dependency build timed out |
 | Python compilation and Git whitespace checks | **Passed** |
 | Original Telegram/OpenRouter MVP demonstration | **Passed** |
 | Telegram/OpenRouter revalidation of the hardening patch | **Passed** (real OpenRouter model, Telegram channel, and OpenClaw gateway) |
@@ -219,10 +223,10 @@ non-blocking channel acknowledgement UX issue rather than a persistence or
 lifecycle failure.
 
 Remaining work for the next architecture phase includes a native Omega worker
-backend, exact backend-level enforcement of per-request tool-call limits,
-recovery/reconciliation of runs interrupted by a process crash, and broader
-live-channel testing. Searchable history and improved automatic specialist
-ranking remain follow-up features rather than MVP merge requirements.
+backend, recovery/reconciliation of runs interrupted by a process crash, and
+broader live-channel testing. Searchable history and improved automatic
+specialist ranking remain follow-up features rather than MVP merge
+requirements.
 
 ## Next architecture: replaceable worker backends
 

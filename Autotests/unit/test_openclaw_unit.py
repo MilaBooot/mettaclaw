@@ -250,6 +250,7 @@ def test_request_target_refuses_when_it_cannot_authenticate(oc, monkeypatch):
 def test_send_includes_previous_response_id_only_for_resume(oc, monkeypatch):
     payloads = []
     timeouts = []
+    health_urls = []
 
     class Session:
         trust_env = True
@@ -271,7 +272,21 @@ def test_send_includes_previous_response_id_only_for_resume(oc, monkeypatch):
                 }],
             })
 
+        def get(self, **kwargs):
+            health_urls.append(kwargs["url"])
+            return _Response(200, {
+                "ok": True,
+                "id": "omega-tool-budget",
+                "protocol": 1,
+                "enforcement": "before_tool_call",
+            })
+
     monkeypatch.setattr(oc, "_request_target", lambda url: ("http://gw/v1/responses", {}))
+    monkeypatch.setattr(
+        oc,
+        "_request_target_for_path",
+        lambda _url, path: ("http://gw" + path, {}),
+    )
     monkeypatch.setattr(oc.requests, "Session", Session)
     oc._send("new", "http://gw", "research-agent")
     oc._send(
@@ -288,7 +303,39 @@ def test_send_includes_previous_response_id_only_for_resume(oc, monkeypatch):
     assert payloads[1]["previous_response_id"] == "resp-old"
     assert payloads[1]["max_output_tokens"] == 500
     assert payloads[1]["max_tool_calls"] == 3
+    assert payloads[1]["input"].startswith(
+        'OMEGA_TOOL_BUDGET_V1 {"max_tool_calls":3}\n'
+    )
+    assert payloads[1]["input"].endswith("continue")
+    assert health_urls == ["http://gw" + oc.TOOL_BUDGET_HEALTH_PATH]
     assert timeouts[1] == 45
+
+
+def test_budgeted_send_fails_closed_without_enforcer(oc, monkeypatch):
+    class Session:
+        trust_env = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def get(self, **_kwargs):
+            return _Response(404, {"error": {"message": "not installed"}})
+
+        def post(self, **_kwargs):
+            pytest.fail("worker request must not start without enforcement")
+
+    monkeypatch.setattr(oc, "_request_target", lambda _url: ("http://gw/v1/responses", {}))
+    monkeypatch.setattr(
+        oc,
+        "_request_target_for_path",
+        lambda _url, path: ("http://gw" + path, {}),
+    )
+    monkeypatch.setattr(oc.requests, "Session", Session)
+    with pytest.raises(oc.OpenClawError, match="enforcer is required"):
+        oc._send("bounded task", "http://gw", "coding-agent", max_tool_calls=2)
 
 
 @pytest.mark.parametrize(

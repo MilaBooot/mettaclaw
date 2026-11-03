@@ -111,9 +111,11 @@ history append is acknowledged, and inspection preserves `failed`,
 For a bounded run, supply a context object with a smaller `budget`, for
 example `max_context_chars: 8000`, `max_output_tokens: 1000`,
 `max_tool_calls: 5`, and `timeout_seconds: 120`. Context and timeout ceilings
-are enforced by Omega. The current OpenClaw adapter forwards the output-token
-and tool-call values, but exact tool-call counting is not supported by its
-OpenResponses endpoint; configure strict per-agent tool policies as well.
+are enforced by Omega. Because OpenResponses itself ignores `max_tool_calls`,
+the required `omega-tool-budget` OpenClaw extension binds the per-run marker in
+`before_agent_run` and blocks the `N+1` tool attempt in `before_tool_call`.
+Strict per-agent tool policies remain required to control which tools are
+available.
 
 Use roughly 120 seconds for a quick lookup/review, the 300-second default for
 a normal task, and at most 600 seconds for a bounded long task. A timeout is
@@ -144,8 +146,8 @@ the same channel-independent path:
 
 ```bash
 cd Autotests
-OMEGACLAW_CONTAINER=omegaclaw \
-OMEGACLAW_OPENCLAW_TOKEN=<token> \
+OMEGA_CONTAINER=omega \
+OMEGA_OPENCLAW_TOKEN=<token> \
 python -m pytest mock/test_subagent_sessions_mock.py -s -v
 ```
 
@@ -159,5 +161,6 @@ python -m pytest mock/test_subagent_sessions_mock.py -s -v
   recovery/reconciliation belong to later phases.
 - Workflow and space teardown must call `cleanup-subagent-scope`; Omega does
   not yet publish a generic automatic teardown event to plugins.
-- Exact per-run tool-call limits require a backend that enforces that field;
-  OpenClaw currently relies on its server-side agent tool policy.
+- OpenClaw execution requires the companion `omega-tool-budget` policy plugin;
+  Omega fails closed before delegation if its authenticated health contract is
+  unavailable.

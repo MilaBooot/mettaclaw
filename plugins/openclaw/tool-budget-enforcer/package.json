@@ -1,0 +1,19 @@
+{
+  "name": "@omega/openclaw-tool-budget-enforcer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node test/budget-state.test.js"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.10.6 <2027"
+  },
+  "openclaw": {
+    "extensions": ["./index.js"],
+    "compat": {
+      "pluginApi": ">=2026.10.6 <2027",
+      "minGatewayVersion": "2026.10.6"
+    }
+  }
+}

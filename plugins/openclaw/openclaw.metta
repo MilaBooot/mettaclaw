@@ -29,31 +29,31 @@
                     (add-skill
                         delegate-task-to-openclaw-agent
                         "Delegate a self-contained task to an external OpenClaw agent in a new separate session. Returns an id immediately, the reply arrives later on its own as an OPENCLAW_RESULT line."
-                        (task_in_quotes))
+                        (task))
                     (add-skill
                         delegate-task-to-subagent
                         "Delegate a bounded task to the best specialist capability (research, coding, or review). Pass only relevant context as text or a JSON object. Returns agent/session/run ids immediately; a compact SUBAGENT_RESULT arrives later."
-                        (task_in_quotes capability_in_quotes relevant_context_in_quotes))
+                        (task capability context))
                     (add-skill
                         delegate-task-to-specific-subagent
                         "Delegate a bounded task to an explicit research-agent, coding-agent, or reviewer-agent. Pass only relevant context as text or a JSON object."
-                        (task_in_quotes agent_id_in_quotes relevant_context_in_quotes))
+                        (task agent_id context))
                     (add-skill
                         resume-subagent-session
                         "Continue an existing subagent session with a new bounded goal and a new run. Pass the session id returned by the earlier delegation."
-                        (session_id_in_quotes task_in_quotes relevant_context_in_quotes))
+                        (session_id task context))
                     (add-skill
                         inspect-subagent-session
                         "Inspect one persistent subagent session and its recent run statuses without exposing the worker's private context or transcript."
-                        (session_id_in_quotes))
+                        (session_id))
                     (add-skill
                         dispose-subagent-session
                         "Dispose one idle subagent session. Pass false to retain run metadata while deleting private messages and continuation state, or true to purge the complete session."
-                        (session_id_in_quotes purge_true_or_false))
+                        (session_id purge))
                     (add-skill
                         cleanup-subagent-scope
                         "Dispose every idle subagent session owned by a workflow or space scope. Pass true to purge complete records during scope cleanup."
-                        (scope_id_in_quotes purge_true_or_false))
+                        (scope_id purge))
                     (add-prompt-extension
                         subagent-coordination
                          "SUBAGENT COORDINATION: When a subagent delegation is accepted, tell the user which agent was selected and include its session and run ids. When a new SUBAGENT_RESULT appears in history, report its final status and summary once. A timed_out result is unfinished work: inspect possible partial effects, then decide whether one smaller, safer retry is appropriate; never blindly repeat a side-effecting task. Use inspect-subagent-session when the user asks for status. Do not expose stored worker prompts, raw replies, or intermediate reasoning.")

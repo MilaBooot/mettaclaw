@@ -99,6 +99,16 @@ http {
             proxy_send_timeout 600s;
         }
 
+        # Fail-closed readiness proof for the OpenClaw worker-side
+        # max_tool_calls enforcement extension.
+        location = /openclaw/plugins/omega-tool-budget/health {
+            proxy_pass ${OPENCLAW_URL}plugins/omega-tool-budget/health;
+            proxy_set_header Authorization "Bearer ${OMEGA_OPENCLAW_TOKEN}";
+            proxy_ssl_server_name on;
+            proxy_ssl_protocols TLSv1.2 TLSv1.3;
+            proxy_http_version 1.1;
+        }
+
         location /openrouter/ {
             proxy_pass https://openrouter.ai/api/v1/;
             proxy_set_header Authorization "Bearer ${OPENROUTER_API_KEY}";

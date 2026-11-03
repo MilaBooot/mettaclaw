@@ -26,8 +26,9 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-GATEWAY_PORT = int(os.environ.get("OMEGACLAW_GATEWAY_PORT", "18789"))
+GATEWAY_PORT = int(os.environ.get("OMEGA_GATEWAY_PORT", "18789"))
 RESPONSES_PATH = "/v1/responses"
+TOOL_BUDGET_HEALTH_PATH = "/plugins/omega-tool-budget/health"
 
 
 class GatewayRecorder:
@@ -88,6 +89,19 @@ def _make_handler(recorder):
                 pass
 
         def do_GET(self):
+            if self.path == TOOL_BUDGET_HEALTH_PATH:
+                auth = self.headers.get("Authorization", "")
+                if not recorder.token or auth != f"Bearer {recorder.token}":
+                    return self._reply(401, {
+                        "error": {"message": "invalid or missing token",
+                                  "type": "invalid_token"}
+                    })
+                return self._reply(200, {
+                    "ok": True,
+                    "id": "omega-tool-budget",
+                    "protocol": 1,
+                    "enforcement": "before_tool_call",
+                })
             self._reply(200, {"status": "alive"})
 
         def do_POST(self):

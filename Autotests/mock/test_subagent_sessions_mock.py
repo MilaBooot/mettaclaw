@@ -6,11 +6,7 @@ from helpers import Checker, dexec, make_prompt, wait_for_history_keyword, wait_
 
 
 RESULT_TIMEOUT = 60
-DB_PATH = "/PeTTa/repos/OmegaClaw-Core/memory/subagent_sessions.sqlite3"
-
-
-def _read_json(path):
-    return json.loads(dexec("cat", path).stdout.strip())
+DB_PATH = "/PeTTa/repos/Omega/memory/subagent_sessions.sqlite3"
 
 
 def _database_snapshot(session_id):
@@ -54,20 +50,24 @@ print(row[0] if row else '')
 def test_subagent_new_session_and_resume_mock(llm, comm, gateway):
     with Checker("persistent subagent new session and resume") as c:
         print(f"\n=== OmegaClaw: persistent subagent mock (run-id {c.run_id}) ===", flush=True)
-        first_path = f"/tmp/subagent_first_{c.run_id}.json"
-        second_path = f"/tmp/subagent_resume_{c.run_id}.json"
         bounded_marker = f"BOUNDED-{c.run_id}"
+        scope_id = f"mock-research-{c.run_id}"
 
         c.step("delegate a bounded research task through the Omega skill")
         prompt = make_prompt(c.run_id, "Use the persistent research specialist.")
         llm.set_answer(
             request=prompt,
-            response=(
-                f'(metta (write-file "{first_path}" '
-                f'(delegate-task-to-subagent "Research session persistence" "research" '
-                f'"Only inspect {bounded_marker}")))\n'
-                f'(send "Persistent subagent accepted {c.run_id}")'
-            ),
+            response=[
+                ("delegate-task-to-subagent", {
+                    "task": "Research session persistence",
+                    "capability": "research",
+                    "context": json.dumps({
+                        "scope_id": scope_id,
+                        "context": f"Only inspect {bounded_marker}",
+                    }),
+                }),
+                ("send", {"content": f"Persistent subagent accepted {c.run_id}"}),
+            ],
         )
         if not comm.send_message(prompt):
             c.fail("comm", "could not deliver the new-session prompt")
@@ -76,10 +76,16 @@ def test_subagent_new_session_and_resume_mock(llm, comm, gateway):
         ):
             c.fail("send", "Omega did not stay responsive during delegation")
 
-        accepted = _read_json(first_path)
-        if accepted.get("status") != "accepted":
-            c.fail("acceptance", f"unexpected result: {accepted}")
-        if accepted.get("agent_id") != "research-agent":
+        session_id = _session_id_for_scope(scope_id)
+        if not session_id:
+            c.fail("acceptance", "delegation did not create the scoped session")
+        first_db = _database_snapshot(session_id)
+        accepted = {
+            "agent_id": first_db["session"]["agent_id"],
+            "session_id": session_id,
+            "run_id": first_db["runs"][0]["run_id"],
+        }
+        if accepted["agent_id"] != "research-agent":
             c.fail("selector", f"research did not select research-agent: {accepted}")
         c.ok("selector", "research capability selected research-agent")
 
@@ -111,7 +117,6 @@ def test_subagent_new_session_and_resume_mock(llm, comm, gateway):
             c.fail("continuation", "new session unexpectedly supplied previous_response_id")
         c.ok("isolation", "Gateway received only the projected worker context")
 
-        first_db = _database_snapshot(accepted["session_id"])
         if first_db["session"]["agent_id"] != "research-agent":
             c.fail("database", f"wrong session owner: {first_db['session']}")
         if len(first_db["runs"]) != 1 or len(first_db["messages"]) != 2:
@@ -122,12 +127,14 @@ def test_subagent_new_session_and_resume_mock(llm, comm, gateway):
         prompt = make_prompt(c.run_id + 1, "Resume the persistent research specialist.")
         llm.set_answer(
             request=prompt,
-            response=(
-                f'(metta (write-file "{second_path}" '
-                f'(resume-subagent-session "{accepted["session_id"]}" '
-                f'"Verify the persisted continuation" "Only verify {bounded_marker}")))\n'
-                f'(send "Persistent subagent resumed {c.run_id}")'
-            ),
+            response=[
+                ("resume-subagent-session", {
+                    "session_id": accepted["session_id"],
+                    "task": "Verify the persisted continuation",
+                    "context": f"Only verify {bounded_marker}",
+                }),
+                ("send", {"content": f"Persistent subagent resumed {c.run_id}"}),
+            ],
         )
         if not comm.send_message(prompt):
             c.fail("comm", "could not deliver the resume prompt")
@@ -136,10 +143,12 @@ def test_subagent_new_session_and_resume_mock(llm, comm, gateway):
         ):
             c.fail("send", "Omega did not acknowledge the resumed run")
 
-        resumed = _read_json(second_path)
-        if resumed.get("session_id") != accepted["session_id"]:
-            c.fail("resume", f"resume changed session: {accepted}, {resumed}")
-        if resumed.get("run_id") == accepted["run_id"]:
+        resumed_db = _database_snapshot(accepted["session_id"])
+        resumed = {
+            "session_id": accepted["session_id"],
+            "run_id": resumed_db["runs"][-1]["run_id"],
+        }
+        if resumed["run_id"] == accepted["run_id"]:
             c.fail("resume", f"resume reused run id: {resumed}")
         if not wait_for_history_keyword(
             c.run_id,
@@ -169,24 +178,24 @@ def test_subagent_timeout_returns_control_to_coordinator_mock(llm, comm, gateway
     with Checker("persistent subagent timeout feedback") as c:
         print(f"\n=== OmegaClaw: subagent timeout (run-id {c.run_id}) ===", flush=True)
         scope_id = f"mock-timeout-{c.run_id}"
-        arguments = json.dumps([
-            "Deadline test",
-            "research",
-            {
-                "scope_id": scope_id,
-                "context": "OCGW_SLEEP:2",
-                "budget": {"timeout_seconds": 1},
-            },
-        ], separators=(",", ":"))
+        context = json.dumps({
+            "scope_id": scope_id,
+            "context": "OCGW_SLEEP:2",
+            "budget": {"timeout_seconds": 1},
+        }, separators=(",", ":"))
 
         c.step("delegate a run whose one-second deadline expires")
         prompt = make_prompt(c.run_id, "Test the persistent specialist deadline.")
         llm.set_answer(
             request=prompt,
-            response=(
-                f'delegate-task-to-subagent {arguments}\n'
-                f'send Timeout test accepted {c.run_id}'
-            ),
+            response=[
+                ("delegate-task-to-subagent", {
+                    "task": "Deadline test",
+                    "capability": "research",
+                    "context": context,
+                }),
+                ("send", {"content": f"Timeout test accepted {c.run_id}"}),
+            ],
         )
         if not comm.send_message(prompt):
             c.fail("comm", "could not deliver the timeout prompt")
@@ -222,15 +231,17 @@ def test_subagent_timeout_returns_control_to_coordinator_mock(llm, comm, gateway
             c.fail("run", f"run timeout was not preserved: {snapshot['runs']}")
         c.ok("timeout", "deadline stopped the worker and returned retry feedback")
 
-        c.step("purge the completed timeout scope through the dynamic skill parser")
+        c.step("purge the completed timeout scope through a structured tool call")
         cleanup_prompt = make_prompt(c.run_id + 1, "Clean up the timeout scope.")
-        cleanup_arguments = json.dumps([scope_id, True], separators=(",", ":"))
         llm.set_answer(
             request=cleanup_prompt,
-            response=(
-                f'cleanup-subagent-scope {cleanup_arguments}\n'
-                f'send Timeout scope cleaned {c.run_id}'
-            ),
+            response=[
+                ("cleanup-subagent-scope", {
+                    "scope_id": scope_id,
+                    "purge": "true",
+                }),
+                ("send", {"content": f"Timeout scope cleaned {c.run_id}"}),
+            ],
         )
         if not comm.send_message(cleanup_prompt):
             c.fail("cleanup-comm", "could not deliver the scope cleanup prompt")

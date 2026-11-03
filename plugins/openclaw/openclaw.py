@@ -28,6 +28,8 @@ from src.logger import get_logger
 logger = get_logger(__name__)
 
 RESPONSES_PATH = "/v1/responses"
+TOOL_BUDGET_HEALTH_PATH = "/plugins/omega-tool-budget/health"
+TOOL_BUDGET_MARKER_PREFIX = "OMEGA_TOOL_BUDGET_V1 "
 # Required by the request schema, but it selects the agent rather than a
 # model: the run uses whatever model that agent is configured with.
 MODEL_ROUTE = "openclaw"
@@ -349,18 +351,31 @@ def _send(
     try:
         with requests.Session() as session:
             session.trust_env = False
+            message_with_budget = message
+            if max_tool_calls is not None:
+                health_url, health_headers = _request_target_for_path(
+                    openclaw_url, TOOL_BUDGET_HEALTH_PATH
+                )
+                _verify_tool_budget_enforcer(
+                    session,
+                    health_url,
+                    health_headers,
+                    min(float(timeout_seconds), 10.0),
+                )
+                message_with_budget = _budgeted_message(message, max_tool_calls)
             payload = {
                 "model": MODEL_ROUTE,
-                "input": message,
+                "input": message_with_budget,
             }
             if previous_response_id:
                 payload["previous_response_id"] = previous_response_id
             if max_output_tokens is not None:
                 payload["max_output_tokens"] = int(max_output_tokens)
             if max_tool_calls is not None:
-                # OpenClaw currently accepts this OpenResponses field but
-                # ignores it. Carry it for backend-contract compatibility;
-                # the agent's server-side policy remains the enforcement layer.
+                # OpenResponses accepts this field but currently ignores it.
+                # The companion omega-tool-budget extension enforces the
+                # first-line marker before each worker tool execution. Keep the
+                # field as well for future native endpoint compatibility.
                 payload["max_tool_calls"] = int(max_tool_calls)
             response = session.post(
                 url=endpoint,
@@ -379,6 +394,58 @@ def _send(
     if not response.ok:
         raise _http_error(response)
     return _extract_reply(response.json())
+
+
+def _budgeted_message(message: str, max_tool_calls: int) -> str:
+    """Prepend the machine-readable budget consumed by the Gateway hook."""
+    limit = int(max_tool_calls)
+    if limit < 1:
+        raise OpenClawError("max_tool_calls must be a positive integer")
+    marker = json.dumps(
+        {"max_tool_calls": limit}, ensure_ascii=True, separators=(",", ":")
+    )
+    return f"{TOOL_BUDGET_MARKER_PREFIX}{marker}\n{message}"
+
+
+def _verify_tool_budget_enforcer(
+    session: requests.Session,
+    health_url: str,
+    headers: dict,
+    timeout_seconds: float,
+) -> None:
+    """Fail closed unless the OpenClaw pre-tool enforcement hook is active."""
+    try:
+        response = session.get(
+            url=health_url,
+            headers=headers,
+            timeout=timeout_seconds,
+        )
+    except requests.RequestException as exc:
+        raise OpenClawError(
+            f"Cannot verify OpenClaw tool-budget enforcement: {exc}"
+        ) from exc
+    if not response.ok:
+        raise OpenClawError(
+            "OpenClaw tool-budget enforcer is required but its authenticated "
+            f"health endpoint returned HTTP {response.status_code}"
+        )
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise OpenClawError(
+            "OpenClaw tool-budget enforcer returned an invalid health response"
+        ) from exc
+    expected = {
+        "ok": True,
+        "id": "omega-tool-budget",
+        "protocol": 1,
+        "enforcement": "before_tool_call",
+    }
+    if any(payload.get(key) != value for key, value in expected.items()):
+        raise OpenClawError(
+            "OpenClaw tool-budget enforcer did not advertise the required "
+            "before_tool_call protocol"
+        )
 
 
 def _request_target(openclaw_url: str):
@@ -403,10 +470,15 @@ def _request_target(openclaw_url: str):
         tuple[str, dict]: The request URL and the headers to seed (the caller
             still adds `x-openclaw-agent-id`).
     """
+    return _request_target_for_path(openclaw_url, RESPONSES_PATH)
+
+
+def _request_target_for_path(openclaw_url: str, path: str):
+    """Build an authenticated proxy or direct target for one Gateway path."""
     gateway_url = config_get_by_key("GATEWAY_URL")
     if gateway_url:
         logger.debug(f"Using the Nginx proxy at {gateway_url} for OpenClaw")
-        return f"{gateway_url.rstrip('/')}/openclaw{RESPONSES_PATH}", {}
+        return f"{gateway_url.rstrip('/')}/openclaw{path}", {}
     token = _get_token()
     if not token:
         # Sending an empty Bearer would come back as a plain 401, which is
@@ -416,7 +488,9 @@ def _request_target(openclaw_url: str):
             "empty, so the request cannot be authenticated"
         )
     logger.debug("No GATEWAY_URL, calling the OpenClaw Gateway directly")
-    return _endpoint(openclaw_url), {"Authorization": f"Bearer {token}"}
+    return _gateway_base(openclaw_url) + path, {
+        "Authorization": f"Bearer {token}"
+    }
 
 
 def _endpoint(openclaw_url: str) -> str:
@@ -431,12 +505,17 @@ def _endpoint(openclaw_url: str) -> str:
     Returns:
         str: Absolute URL of the OpenResponses endpoint.
     """
+    return _gateway_base(openclaw_url) + RESPONSES_PATH
+
+
+def _gateway_base(openclaw_url: str) -> str:
+    """Normalize a configured HTTP or legacy WebSocket Gateway base URL."""
     base = openclaw_url.strip().rstrip("/")
     for ws_scheme, http_scheme in (("wss://", "https://"), ("ws://", "http://")):
         if base.startswith(ws_scheme):
             base = http_scheme + base[len(ws_scheme):]
             break
-    return base + RESPONSES_PATH
+    return base
 
 
 def _http_error(response: requests.Response) -> OpenClawError:
