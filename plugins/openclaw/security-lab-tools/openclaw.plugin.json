@@ -1,0 +1,41 @@
+{
+  "id": "omega-security-lab",
+  "name": "Omega Security Lab Tools",
+  "description": "Narrow evaluation tools restricted to one labeled, disposable security lab container.",
+  "categories": [
+    "developer-tools"
+  ],
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "containerName": {
+        "type": "string",
+        "default": "omega-security-lab",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+      }
+    },
+    "additionalProperties": false
+  },
+  "version": "0.1.0",
+  "contracts": {
+    "tools": [
+      "omega_lab_read",
+      "omega_lab_write",
+      "omega_lab_verify"
+    ]
+  },
+  "toolMetadata": {
+    "omega_lab_read": {
+      "optional": true
+    },
+    "omega_lab_write": {
+      "optional": true
+    },
+    "omega_lab_verify": {
+      "optional": true
+    }
+  }
+}

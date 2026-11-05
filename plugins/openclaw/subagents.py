@@ -10,6 +10,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import logging
 import os
@@ -34,6 +35,8 @@ OUTBOX_LEASE_SECONDS = 300
 RESULT_STATUSES = frozenset({
     "completed", "failed", "cancelled", "blocked", "timed_out",
 })
+TRACE_SCHEMA_VERSION = 1
+_trace_lock = threading.Lock()
 
 
 class SubagentError(RuntimeError):
@@ -62,6 +65,30 @@ class SessionDisposedError(SessionError):
 
 class BudgetExceededError(SubagentError):
     """Raised before execution when a bounded request exceeds policy."""
+
+
+class CoordinationTrace:
+    """Append bounded coordination evidence without persisting worker prompts."""
+
+    def __init__(self, path: str | os.PathLike[str] | None = None):
+        self.path = Path(path).expanduser().resolve() if path else None
+
+    def emit(self, event: str, **fields: Any) -> None:
+        if self.path is None:
+            return
+        payload = {
+            "schema_version": TRACE_SCHEMA_VERSION,
+            "timestamp": _now(),
+            "event": str(event),
+            **fields,
+        }
+        line = json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n"
+        with _trace_lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8", newline="\n") as stream:
+                stream.write(line)
+                stream.flush()
+                os.fsync(stream.fileno())
 
 
 @dataclass(frozen=True)
@@ -278,7 +305,9 @@ DEFAULT_REGISTRY = SubagentRegistry((
         description="Evidence gathering, comparison, and summarisation.",
         capabilities=frozenset({"research", "search", "information gathering", "comparison", "summarize"}),
         instructions="Investigate the bounded question and return concise evidence-backed findings.",
-        allowed_tools=frozenset({"web-search", "read-file", "memory-read"}),
+        allowed_tools=frozenset({
+            "web-search", "read-file", "memory-read", "omega_lab_read",
+        }),
         backend_agent_id="research-agent",
     ),
     SubagentDefinition(
@@ -287,7 +316,10 @@ DEFAULT_REGISTRY = SubagentRegistry((
         description="Repository inspection, implementation, debugging, and tests.",
         capabilities=frozenset({"code", "coding", "debug", "test", "repository inspection"}),
         instructions="Make only the requested repository changes and report artifacts and tests.",
-        allowed_tools=frozenset({"read-file", "write-file", "shell", "test-runner", "git-read"}),
+        allowed_tools=frozenset({
+            "read-file", "write-file", "shell", "test-runner", "git-read",
+            "omega_lab_read", "omega_lab_write",
+        }),
         backend_agent_id="coding-agent",
     ),
     SubagentDefinition(
@@ -296,7 +328,10 @@ DEFAULT_REGISTRY = SubagentRegistry((
         description="Independent validation, critique, and result inspection.",
         capabilities=frozenset({"review", "validate", "validation", "critique"}),
         instructions="Check the supplied work against its criteria and return actionable findings.",
-        allowed_tools=frozenset({"read-file", "test-results", "test-runner", "git-read"}),
+        allowed_tools=frozenset({
+            "read-file", "test-results", "test-runner", "git-read",
+            "omega_lab_read", "omega_lab_verify",
+        }),
         backend_agent_id="reviewer-agent",
     ),
 ))
@@ -699,10 +734,16 @@ class SubagentRuntime:
         store: SessionStore,
         executor: Callable[[PreparedRun], Mapping[str, Any]],
         registry: SubagentRegistry = DEFAULT_REGISTRY,
+        trace_path: str | os.PathLike[str] | None = None,
     ):
         self.store = store
         self.executor = executor
         self.registry = registry
+        self.trace = CoordinationTrace(
+            trace_path
+            if trace_path is not None
+            else os.getenv("OMEGA_SUBAGENT_TRACE_PATH")
+        )
 
     def prepare(
         self,
@@ -718,6 +759,7 @@ class SubagentRuntime:
         projection = ContextProjection.from_input(goal, context)
         previous_response_id = None
         if session_id:
+            selection_reason = "resumed_session"
             session = self.store.get_session(session_id)
             definition = self.registry.get(session["agent_id"])
             if agent_id and agent_id != definition.id:
@@ -726,6 +768,7 @@ class SubagentRuntime:
                 )
             previous_response_id = session["backend_response_id"]
         else:
+            selection_reason = "explicit_agent" if agent_id else "capability"
             definition = self.registry.select(capability, goal, agent_id)
         resolved_tools = ToolResolver.resolve(
             definition, projection.requested_tools
@@ -749,7 +792,7 @@ class SubagentRuntime:
             run_id,
             previous_response_id is not None,
         )
-        return PreparedRun(
+        prepared = PreparedRun(
             definition,
             projection,
             session_id,
@@ -759,8 +802,44 @@ class SubagentRuntime:
             resolved_tools,
             projection.budget,
         )
+        context_bytes = projection.context.encode("utf-8")
+        self.trace.emit(
+            "delegation_prepared",
+            agent_id=definition.id,
+            session_id=session_id,
+            run_id=run_id,
+            goal=goal,
+            selection={
+                "reason": selection_reason,
+                "requested_capability": str(capability or ""),
+                "explicit_agent_id": str(agent_id or ""),
+                "resumed": previous_response_id is not None,
+            },
+            context_projection={
+                "scope_id": projection.scope_id,
+                "context_chars": len(projection.context),
+                "context_sha256": hashlib.sha256(context_bytes).hexdigest(),
+                "facts": list(projection.facts),
+                "constraints": list(projection.constraints),
+                "artifacts": list(projection.artifacts),
+                "expected_output": projection.expected_output,
+                "evaluation_criteria": list(projection.evaluation_criteria),
+            },
+            permissions={
+                "requested_tools": list(projection.requested_tools),
+                "resolved_tools": list(resolved_tools),
+            },
+            budget=asdict(projection.budget),
+        )
+        return prepared
 
     def execute(self, prepared: PreparedRun) -> SubagentResult:
+        self.trace.emit(
+            "worker_started",
+            agent_id=prepared.definition.id,
+            session_id=prepared.session_id,
+            run_id=prepared.run_id,
+        )
         try:
             backend = dict(self.executor(prepared))
             backend_status = _normalise_status(backend.get("status", "failed"))
@@ -785,6 +864,7 @@ class SubagentRuntime:
                     error=result.error,
                     delivery_payload=_render_result(result),
                 )
+                self._trace_result(result)
                 return result
             reply = str(backend.get("reply", "")).strip()
             if not reply:
@@ -802,6 +882,7 @@ class SubagentRuntime:
                 result.error,
                 delivery_payload=_render_result(result),
             )
+            self._trace_result(result)
             return result
         except Exception as exc:
             error = str(exc)[:1000]
@@ -824,7 +905,22 @@ class SubagentRuntime:
                 error=error,
                 delivery_payload=_render_result(result),
             )
+            self._trace_result(result)
             return result
+
+    def _trace_result(self, result: SubagentResult) -> None:
+        self.trace.emit(
+            "worker_result",
+            agent_id=result.agent_id,
+            session_id=result.session_id,
+            run_id=result.run_id,
+            status=result.status,
+            summary=result.summary,
+            findings=list(result.findings),
+            artifacts=list(result.artifacts),
+            evidence=list(result.evidence),
+            error=result.error,
+        )
 
     def run_subagent(self, **kwargs: Any) -> SubagentResult:
         return self.execute(self.prepare(**kwargs))

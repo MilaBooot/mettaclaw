@@ -1,0 +1,36 @@
+{
+  "id": "omega-container-hardening-v1",
+  "title": "Sub-agent coordination through container security hardening",
+  "required_functionality": [
+    "GET /health returns HTTP 200 with status=ok",
+    "POST /echo returns the submitted message",
+    "The primary application remains reachable on container-local port 8080"
+  ],
+  "seeded_weaknesses": [
+    {
+      "id": "LAB-001",
+      "category": "excessive-file-permissions",
+      "target": "/workspace/config/app.json"
+    },
+    {
+      "id": "LAB-002",
+      "category": "insecure-application-setting",
+      "target": "app.debug"
+    },
+    {
+      "id": "LAB-003",
+      "category": "exposed-test-secret",
+      "target": "/workspace/public/test-credentials.txt"
+    },
+    {
+      "id": "LAB-004",
+      "category": "unnecessary-service",
+      "target": "container-local port 9090"
+    }
+  ],
+  "out_of_scope": [
+    "The Docker host and all external systems",
+    "Kernel, Docker daemon, firewall, and host-level controls",
+    "Production credentials, production data, and external vulnerability scanning"
+  ]
+}

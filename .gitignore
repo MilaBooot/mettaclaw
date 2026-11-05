@@ -22,6 +22,9 @@ __pycache__/
 *.pyc
 Autotests/logs/
 
+# generated dependencies for the OpenClaw security-lab tool plugin
+plugins/openclaw/security-lab-tools/node_modules/
+
 # IDE
 .idea/
 

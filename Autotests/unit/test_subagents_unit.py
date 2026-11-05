@@ -70,6 +70,9 @@ def test_registry_finds_agents_and_selects_by_capability(sa):
     assert registry.select("research", "Investigate sessions").id == "research-agent"
     assert registry.select("coding", "Implement the store").id == "coding-agent"
     assert registry.select("review", "Critique the result").id == "reviewer-agent"
+    assert "omega_lab_read" in registry.get("research-agent").allowed_tools
+    assert "omega_lab_write" in registry.get("coding-agent").allowed_tools
+    assert "omega_lab_verify" in registry.get("reviewer-agent").allowed_tools
 
 
 def test_explicit_agent_overrides_selection_and_unknown_capability_fails(sa):
@@ -601,3 +604,38 @@ def test_budget_cannot_exceed_system_ceiling(sa, tmp_path):
             capability="coding",
             context={"budget": {"max_tool_calls": sa.MAX_TOOL_CALLS + 1}},
         )
+
+
+def test_coordination_trace_records_decisions_permissions_and_results(sa, tmp_path):
+    trace_path = tmp_path / "coordination.jsonl"
+    runtime = sa.SubagentRuntime(
+        sa.SessionStore(tmp_path / "trace.sqlite3"),
+        FakeExecutor(),
+        trace_path=trace_path,
+    )
+    result = runtime.run_subagent(
+        task="Inspect the disposable security lab",
+        capability="research",
+        context={
+            "context": "bounded private evidence",
+            "scope_id": "security-lab-run-1",
+            "constraints": ["Do not access the host"],
+            "artifacts": ["container snapshot"],
+            "requested_tools": ["read-file"],
+            "budget": {"max_tool_calls": 3, "timeout_seconds": 30},
+        },
+    )
+    events = [json.loads(line) for line in trace_path.read_text().splitlines()]
+    assert [event["event"] for event in events] == [
+        "delegation_prepared", "worker_started", "worker_result"
+    ]
+    prepared = events[0]
+    assert prepared["agent_id"] == "research-agent"
+    assert prepared["selection"]["reason"] == "capability"
+    assert prepared["permissions"]["resolved_tools"] == ["read-file"]
+    assert prepared["budget"]["max_tool_calls"] == 3
+    assert prepared["context_projection"]["scope_id"] == "security-lab-run-1"
+    assert len(prepared["context_projection"]["context_sha256"]) == 64
+    assert "bounded private evidence" not in trace_path.read_text()
+    assert events[-1]["run_id"] == result.run_id
+    assert events[-1]["status"] == "completed"

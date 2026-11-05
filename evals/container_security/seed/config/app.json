@@ -1,0 +1,5 @@
+{
+  "debug": true,
+  "environment": "evaluation",
+  "service_name": "security-lab"
+}

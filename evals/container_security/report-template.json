@@ -1,0 +1,37 @@
+{
+  "scenario_id": "omega-container-hardening-v1",
+  "target": "omega-security-lab:/workspace",
+  "overall_status": "completed",
+  "findings": [
+    {
+      "id": "LAB-001",
+      "disposition": "fixed",
+      "summary": "",
+      "changes": [],
+      "evidence": [],
+      "verification_checks": ["LAB-001"]
+    }
+  ],
+  "functionality": [
+    {
+      "id": "FUNC-001",
+      "status": "passed",
+      "evidence": []
+    }
+  ],
+  "subagent_contributions": [
+    {
+      "agent_id": "research-agent",
+      "session_id": "ses-...",
+      "run_id": "run-...",
+      "task": "",
+      "result_used_by_parent": true,
+      "summary": ""
+    }
+  ],
+  "duplicate_work": [],
+  "conflicting_actions": [],
+  "failures": [],
+  "unresolved_risks": [],
+  "limitations": []
+}
