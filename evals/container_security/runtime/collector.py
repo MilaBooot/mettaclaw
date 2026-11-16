@@ -110,17 +110,24 @@ def collect():
                     exposed_markers.append(str(path.relative_to(ROOT)))
             except OSError:
                 pass
-    try:
-        mode = stat.S_IMODE(config_path.stat().st_mode)
-    except OSError:
-        mode = None
+    mode_paths = {
+        "app.json": config_path,
+        "services.json": ROOT / "config" / "services.json",
+        "test-credentials.txt": ROOT / "public" / "test-credentials.txt",
+    }
+    file_modes = {}
+    for name, path in mode_paths.items():
+        try:
+            file_modes[name] = stat.S_IMODE(path.stat().st_mode)
+        except OSError:
+            file_modes[name] = None
     return {
         "health": request("http://127.0.0.1:8080/health"),
         "echo": request("http://127.0.0.1:8080/echo", {"message": "omega-lab-check"}),
         "debug_endpoint": request("http://127.0.0.1:8080/debug/config"),
         "app_config": load_json(config_path),
         "services_config": load_json(ROOT / "config" / "services.json"),
-        "app_config_mode": mode,
+        "file_modes": file_modes,
         "public_files": public_files,
         "exposed_secret_files": exposed_markers,
         "main_port_open": port_open(8080),

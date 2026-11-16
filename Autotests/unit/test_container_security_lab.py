@@ -25,7 +25,11 @@ def secure_snapshot():
         "debug_endpoint": {"status": 404, "body": {"error": "not found"}},
         "app_config": {"debug": False},
         "services_config": {"enable_test_file_service": False},
-        "app_config_mode": 0o640,
+        "file_modes": {
+            "app.json": 0o640,
+            "services.json": 0o640,
+            "test-credentials.txt": 0o600,
+        },
         "public_files": [],
         "exposed_secret_files": [],
         "main_port_open": True,
@@ -65,7 +69,11 @@ def test_seeded_weaknesses_are_independently_detected():
         "debug_endpoint": {"status": 200, "body": {"debug": True}},
         "app_config": {"debug": True},
         "services_config": {"enable_test_file_service": True},
-        "app_config_mode": 0o666,
+        "file_modes": {
+            "app.json": 0o666,
+            "services.json": 0o644,
+            "test-credentials.txt": 0o644,
+        },
         "public_files": ["public/test-credentials.txt"],
         "exposed_secret_files": ["public/test-credentials.txt"],
         "test_port_open": True,
@@ -74,6 +82,14 @@ def test_seeded_weaknesses_are_independently_detected():
     checks = {item["id"]: item for item in verifier.evaluate_snapshot(snapshot)}
     assert all(checks[item]["passed"] is False for item in ("LAB-001", "LAB-002", "LAB-003", "LAB-004"))
     assert all(checks[item]["passed"] is True for item in ("FUNC-001", "FUNC-002", "FUNC-003"))
+
+
+@pytest.mark.parametrize("name", ["app.json", "services.json", "test-credentials.txt"])
+def test_each_remediated_file_mode_is_independently_verified(name):
+    snapshot = secure_snapshot()
+    snapshot["file_modes"][name] = 0o666
+    checks = {item["id"]: item for item in verifier.evaluate_snapshot(snapshot)}
+    assert checks["LAB-001"]["passed"] is False
 
 
 def test_isolation_contract_rejects_bind_mounts_or_missing_controls():

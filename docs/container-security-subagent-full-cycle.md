@@ -210,8 +210,7 @@ The final structured report contains:
 - duplicate work, conflicts, failures, limitations, and unresolved risks.
 
 The report returned in Telegram is user-visible output. For the evaluation,
-the operator saves the JSON as `final-report.json`; saving is currently an
-operator step, not an automatic report-writing tool.
+Omega saves the JSON under persistent `memory/`, never container `/tmp`.
 
 ### 11. Independent evaluation and cleanup
 
@@ -221,10 +220,12 @@ operator step, not an automatic report-writing tool.
 2. the coordination JSONL trace; and
 3. fresh live checks from the target.
 
-The run passes only when the report agrees with live evidence, functionality
-remains operational, and at least one completed specialist result was actually
-used by the parent. Finally, the operator disposes sessions as required and
-resets or destroys the disposable lab.
+The evaluator atomically saves its evaluation result. The run passes only when
+every weakness is fixed, the report agrees with live evidence, functionality
+remains operational, and at least one evidenced completed specialist result was
+used by the parent. Accurate unresolved findings produce `partial`, not
+`completed`. Finally, the operator disposes sessions as required and resets or
+destroys the disposable lab.
 
 ## End-to-end sequence
 

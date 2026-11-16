@@ -206,6 +206,18 @@ history as a blind evaluation. The target must be reset to the vulnerable
 snapshot, the parent must delegate without corrective prompting, and the
 complete cycle should finish within the enforced retry policy.
 
+## Hardening follow-up
+
+The follow-up implementation now rejects unstructured or unevidenced
+`completed` results, carries explicit evidence/provenance and remaining work
+between workers, uses action-specific tool schemas, and allocates Coding a
+20-call default while Research and Reviewer retain 12-call defaults.
+The verifier checks all three remediated file modes, reports are saved
+atomically under persistent Omega memory and evaluated against fresh evidence,
+and credential-bearing Telegram proxy locations no longer retain access or
+error logs. A clean live rerun is still required before replacing the original
+results above with a new benchmark result.
+
 ## Reproduction references
 
 The complete execution model and diagrams are documented in

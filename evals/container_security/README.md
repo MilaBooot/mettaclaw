@@ -129,7 +129,8 @@ transcript, and intermediate reasoning.
 
 1. The parent records the scope and functionality contract.
 2. `research-agent` receives read-only evidence and reports suspected issues.
-3. The parent deduplicates findings and creates one ordered remediation plan.
+3. The parent deduplicates findings and passes Coding `handoff_evidence`,
+   `remaining_work`, and narrowly scoped `freshness_checks` with provenance.
 4. `coding-agent` is the only writer and applies the approved changes.
 5. `reviewer-agent` independently inspects the live state and runs the verifier.
 6. The parent reconciles the reports with deterministic evidence and produces
@@ -141,6 +142,12 @@ is the help request to Omega; the worker receives no new privilege. The parent
 may validate the request and make one narrower delegation to the appropriate
 specialist in a new session, preventing privilege escalation and delegation
 loops.
+
+Research and Reviewer default to 12 tool calls. Coding defaults to 20 because
+deferred-tool discovery and bounded mutation acknowledgements consume calls
+before independent verification; callers can still set a smaller explicit
+budget for genuinely small tasks. When Research supplies exact paths and
+values, give Coding only `omega_lab_write` and leave all reads to Reviewer.
 
 The agent-facing task must identify only `/workspace` as writable scope. It may
 inspect the target container but must not receive host paths, Docker credentials,
@@ -157,7 +164,8 @@ are out of scope. Delegate bounded investigation, remediation, and independent
 verification tasks to the existing research, coding, and reviewer specialists.
 Use only the omega_lab_* tools assigned to each worker. Ensure there is only
 one writer. Return the final result using report-template.json, including the
-session/run IDs whose results you used.
+session/run IDs whose results you used. Before announcing completion, call
+save-subagent-report with the scope ID and final JSON.
 ```
 
 ## Verification
@@ -173,21 +181,21 @@ reporting criterion when a security weakness remains but is accurately marked
 unresolved; isolation and required functionality must always pass. The verifier
 checks live state independently, so an agent's own claim is not proof.
 
-Save the parent agent's final JSON response as `final-report.json`, then compare
-it with the live verifier and coordination trace:
+Save the parent agent's final JSON response directly under persistent Omega
+memory, never container `/tmp`, then compare it with the live verifier and
+coordination trace:
 
 ```bash
 python3 evals/container_security/evaluate_report.py \
-  --report final-report.json \
-  --trace memory/security-lab-coordination.jsonl
+  --report memory/final-report.json \
+  --trace memory/security-lab-coordination.jsonl \
+  --output memory/final-report-evaluation.json
 ```
 
-This comparison checks that each seeded weakness is accurately reported as
-fixed or unresolved, functionality claims match the live container, at least
-one sub-agent completed, and the parent identifies a real completed result that
-influenced its report. `remediation_complete` is reported separately because
-the acceptance criteria allow a weakness to remain when it is explicitly
-documented as unresolved.
+The evaluator atomically saves its result, derives the expected outer status
+from live state, requires evidence for every claim and used worker result, and
+returns success only when every weakness is fixed. An accurately reported
+unresolved weakness produces a valid `partial` report, not task success.
 
 Destroy the lab when finished:
 

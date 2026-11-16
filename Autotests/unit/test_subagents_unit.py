@@ -54,7 +54,7 @@ class FakeExecutor:
         return {
             "status": "ok",
             "responseId": f"resp-{len(self.calls)}",
-            "reply": json.dumps(self.reply),
+            "reply": self.reply if isinstance(self.reply, str) else json.dumps(self.reply),
         }
 
 
@@ -237,11 +237,33 @@ def test_requested_tool_is_checked_before_run_creation(sa, tmp_path):
     assert executor.calls == []
 
 
+def test_default_tool_budget_is_allocated_by_worker_role(sa, tmp_path):
+    runtime, _ = _runtime(sa, tmp_path)
+    research = runtime.prepare(task="Inspect", capability="research")
+    assert research.budget.max_tool_calls == sa.DEFAULT_TOOL_CALLS
+    runtime.execute(research)
+
+    coding = runtime.prepare(task="Implement", capability="coding")
+    assert coding.budget.max_tool_calls == sa.DEFAULT_CODING_TOOL_CALLS
+
+
+def test_explicit_tool_budget_still_overrides_role_default(sa, tmp_path):
+    runtime, _ = _runtime(sa, tmp_path)
+    coding = runtime.prepare(
+        task="Small edit",
+        capability="coding",
+        context={"budget": {"max_tool_calls": 6}},
+    )
+    assert coding.budget.max_tool_calls == 6
+
+
 def test_only_compact_result_is_returned_while_transcript_stays_stored(sa, tmp_path):
     reply = {
         "status": "completed",
         "summary": "public summary",
         "findings": ["finding"],
+        "artifacts": [],
+        "evidence": ["finding independently observed"],
     }
     runtime, _ = _runtime(sa, tmp_path, FakeExecutor(reply=reply))
     result = runtime.run_subagent(
@@ -271,6 +293,9 @@ def test_end_to_end_selection_projection_persistence_and_result(sa, tmp_path):
         capability="review",
         context={
             "facts": ["tests passed"],
+            "handoff_evidence": ["research run-1: config value observed"],
+            "remaining_work": ["apply the bounded fix"],
+            "freshness_checks": ["re-read only the changed file"],
             "constraints": ["read only"],
             "expected_output": "A short verdict",
             "requested_tools": ["read-file"],
@@ -281,6 +306,10 @@ def test_end_to_end_selection_projection_persistence_and_result(sa, tmp_path):
     assert "tests passed" in prompt
     assert "read only" in prompt
     assert "A short verdict" in prompt
+    assert "research run-1: config value observed" in prompt
+    assert "apply the bounded fix" in prompt
+    assert "re-read only the changed file" in prompt
+    assert "do not repeat discovery" in prompt
     assert "Return only a JSON object" in prompt
     assert len(runtime.store.list_messages(result.session_id)) == 2
 
@@ -340,6 +369,7 @@ def test_metta_heartbeat_uses_durable_subagent_outbox_delivery():
         source = stream.read()
     assert "subagents.deliver_completed" in source
     assert "subagents.take_completed" not in source
+    assert "subagents.save_report" in source
 
 
 def test_entrypoint_preserves_trace_path_but_not_gateway_secret():
@@ -409,6 +439,22 @@ def test_inspect_unknown_session_returns_clean_error(sa, tmp_path):
     ))
     assert inspected["status"] == "error"
     assert inspected["type"] == "session_error"
+
+
+def test_report_is_validated_and_atomically_saved_beside_store(sa, tmp_path):
+    store_path = tmp_path / "memory" / "subagents.sqlite3"
+    saved = json.loads(sa.save_report(
+        "workflow-1", {"overall_status": "completed"}, str(store_path)
+    ))
+    target = tmp_path / "memory" / "subagent_reports" / "workflow-1.json"
+    assert saved["status"] == "saved"
+    assert json.loads(target.read_text()) == {"overall_status": "completed"}
+    assert len(saved["sha256"]) == 64
+    assert not list(target.parent.glob("*.tmp"))
+
+    rejected = json.loads(sa.save_report("../escape", {}, str(store_path)))
+    assert rejected["status"] == "error"
+    assert rejected["type"] == "report_error"
 
 
 def test_resolved_tool_subset_reaches_executor_and_prompt(sa, tmp_path):
@@ -673,3 +719,33 @@ def test_coordination_trace_records_decisions_permissions_and_results(sa, tmp_pa
     assert "bounded private evidence" not in trace_path.read_text()
     assert events[-1]["run_id"] == result.run_id
     assert events[-1]["status"] == "completed"
+def test_unstructured_or_unevidenced_results_cannot_complete(sa, tmp_path):
+    runtime, _ = _runtime(sa, tmp_path, FakeExecutor(reply="plain worker reply"))
+    plain = runtime.run_subagent(task="Review", capability="review")
+    assert plain.status == "failed"
+    assert "must be one JSON object" in plain.error
+
+    runtime, _ = _runtime(sa, tmp_path, FakeExecutor(reply={
+        "status": "completed",
+        "summary": "claim without proof",
+        "findings": [],
+        "artifacts": [],
+        "evidence": [],
+    }))
+    unsupported = runtime.run_subagent(task="Review", capability="review")
+    assert unsupported.status == "failed"
+    assert "evidence(non-empty for completed results)" in unsupported.error
+
+
+def test_one_fenced_structured_result_is_validated_despite_brief_wrapper(sa, tmp_path):
+    reply = "Completed the bounded task.\n```json\n" + json.dumps({
+        "status": "completed",
+        "summary": "verified result",
+        "findings": [],
+        "artifacts": ["artifact"],
+        "evidence": ["independent check passed"],
+    }) + "\n```"
+    runtime, _ = _runtime(sa, tmp_path, FakeExecutor(reply=reply))
+    result = runtime.run_subagent(task="Review", capability="review")
+    assert result.status == "completed"
+    assert result.evidence == ("independent check passed",)

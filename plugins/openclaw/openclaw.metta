@@ -47,6 +47,10 @@
                         "Inspect one persistent subagent session and its recent run statuses without exposing the worker's private context or transcript."
                         (session_id))
                     (add-skill
+                        save-subagent-report
+                        "Atomically save one validated JSON workflow report under persistent Omega memory. Use the delegation scope id as the report id."
+                        (scope_id report))
+                    (add-skill
                         dispose-subagent-session
                         "Dispose one idle subagent session. Pass false to retain run metadata while deleting private messages and continuation state, or true to purge the complete session."
                         (session_id purge))
@@ -56,7 +60,7 @@
                         (scope_id purge))
                     (add-prompt-extension
                         subagent-coordination
-                         "SUBAGENT COORDINATION: When a subagent delegation is accepted, tell the user which agent was selected and include its session and run ids. When a new SUBAGENT_RESULT appears in history, report its final status and summary once. A blocked result with help_requested=true is a worker request for parent help: validate required_capability against the original scope, then make at most one narrower delegation to the appropriate specialist in a new session. Never broaden the blocked worker's tools, create delegation loops, or allow multiple writers. A timed_out result is unfinished work: inspect possible partial effects, then decide whether one smaller, safer retry is appropriate; never blindly repeat a side-effecting task. Use inspect-subagent-session when the user asks for status. Do not expose stored worker prompts, raw replies, or intermediate reasoning.")
+                         "SUBAGENT COORDINATION: When a subagent delegation is accepted, tell the user which agent was selected and include its session and run ids. When a new SUBAGENT_RESULT appears in history, report its final status and summary once. Treat completed as usable only when structured evidence supports it; final workflow success requires independent validation. Pass later workers concise handoff_evidence with provenance, remaining_work, and only necessary freshness_checks so they do not repeat discovery. Save a final JSON report with save-subagent-report before announcing completion. A blocked result with help_requested=true is a worker request for parent help: validate required_capability against the original scope, then make at most one narrower delegation to the appropriate specialist in a new session. Never broaden the blocked worker's tools, create delegation loops, or allow multiple writers. A timed_out result is unfinished work: inspect possible partial effects, then decide whether one smaller, safer retry is appropriate; never blindly repeat a side-effecting task. Use inspect-subagent-session when the user asks for status. Do not expose stored worker prompts, raw replies, or intermediate reasoning.")
                     (add-heartbeat-listener
                         openclaw
                         (|-> ($iter) (openclaw-collect-results $iter)))
@@ -107,6 +111,14 @@
     (py-call (
         subagents.inspect_session
         $session-id
+        (subagentStorePath)
+    )))
+
+(= (save-subagent-report $scope-id $report)
+    (py-call (
+        subagents.save_report
+        $scope-id
+        $report
         (subagentStorePath)
     )))
 

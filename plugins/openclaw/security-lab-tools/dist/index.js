@@ -17,17 +17,15 @@ export default defineToolPlugin({
             name: "omega_lab_read",
             description: "List, inspect, or read files only inside /workspace in the disposable Omega security lab.",
             optional: true,
-            parameters: Type.Object({
-                action: Type.Union([
-                    Type.Literal("list"),
-                    Type.Literal("read"),
-                    Type.Literal("actions"),
-                    Type.Literal("snapshot"),
-                ]),
-                path: Type.Optional(Type.String({
-                    description: "Path below /workspace; required for read.",
-                })),
-            }, { additionalProperties: false }),
+            parameters: Type.Union([
+                Type.Object({ action: Type.Literal("list") }, { additionalProperties: false }),
+                Type.Object({ action: Type.Literal("actions") }, { additionalProperties: false }),
+                Type.Object({ action: Type.Literal("snapshot") }, { additionalProperties: false }),
+                Type.Object({
+                    action: Type.Literal("read"),
+                    path: Type.String({ description: "Path below /workspace." }),
+                }, { additionalProperties: false }),
+            ]),
             async execute(params, config) {
                 const container = validateContainerName(config.containerName);
                 if (params.action === "snapshot")
@@ -39,20 +37,26 @@ export default defineToolPlugin({
             name: "omega_lab_write",
             description: "Write, chmod, or remove one existing regular file below /workspace in the disposable lab. No shell execution is available.",
             optional: true,
-            parameters: Type.Object({
-                action: Type.Union([
-                    Type.Literal("write"),
-                    Type.Literal("chmod"),
-                    Type.Literal("remove"),
-                ]),
-                path: Type.String(),
-                text: Type.Optional(Type.String({ maxLength: 16384 })),
-                mode: Type.Optional(Type.Union([
-                    Type.Literal("0600"),
-                    Type.Literal("0640"),
-                    Type.Literal("0644"),
-                ])),
-            }, { additionalProperties: false }),
+            parameters: Type.Union([
+                Type.Object({
+                    action: Type.Literal("write"),
+                    path: Type.String(),
+                    text: Type.String({ maxLength: 16384 }),
+                }, { additionalProperties: false }),
+                Type.Object({
+                    action: Type.Literal("chmod"),
+                    path: Type.String(),
+                    mode: Type.Union([
+                        Type.Literal("0600"),
+                        Type.Literal("0640"),
+                        Type.Literal("0644"),
+                    ]),
+                }, { additionalProperties: false }),
+                Type.Object({
+                    action: Type.Literal("remove"),
+                    path: Type.String(),
+                }, { additionalProperties: false }),
+            ]),
             async execute(params, config) {
                 return invokeControl(validateContainerName(config.containerName), params);
             },

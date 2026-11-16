@@ -125,6 +125,8 @@ http {
         # Agent calls /telegram/getUpdates → proxy rewrites to
         # /bot<TOKEN>/getUpdates and forwards to Telegram.
         location /telegram/ {
+            access_log off;
+            error_log /dev/null;
             rewrite ^/telegram/(.*)$ /bot${TG_BOT_TOKEN}/$1 break;
             proxy_pass https://api.telegram.org;
             proxy_set_header Host api.telegram.org;
@@ -136,6 +138,8 @@ http {
         # Telegram file downloads: Telegram serves uploaded files from
         # /file/bot<TOKEN>/<path>, not /bot<TOKEN>/<path>, so media needs its own.
         location /telegram-file/ {
+            access_log off;
+            error_log /dev/null;
             rewrite ^/telegram-file/(.*)$ /file/bot${TG_BOT_TOKEN}/$1 break;
             proxy_pass https://api.telegram.org;
             proxy_set_header Host api.telegram.org;

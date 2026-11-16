@@ -15,6 +15,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import sqlite3
 import threading
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
@@ -30,6 +31,7 @@ MAX_TOOL_CALLS = 20
 MAX_TIMEOUT_SECONDS = 600
 DEFAULT_OUTPUT_TOKENS = 2000
 DEFAULT_TOOL_CALLS = 12
+DEFAULT_CODING_TOOL_CALLS = 20
 DEFAULT_TIMEOUT_SECONDS = 300
 OUTBOX_LEASE_SECONDS = 300
 RESULT_STATUSES = frozenset({
@@ -101,9 +103,11 @@ class ExecutionBudget:
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
 
     @classmethod
-    def from_input(cls, value: Any = None) -> "ExecutionBudget":
+    def from_input(
+        cls, value: Any = None, default_tool_calls: int = DEFAULT_TOOL_CALLS
+    ) -> "ExecutionBudget":
         if value is None:
-            return cls()
+            return cls(max_tool_calls=default_tool_calls)
         if isinstance(value, cls):
             return value
         if not isinstance(value, Mapping):
@@ -133,7 +137,7 @@ class ExecutionBudget:
                 "max_output_tokens", DEFAULT_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS
             ),
             max_tool_calls=bounded(
-                "max_tool_calls", DEFAULT_TOOL_CALLS, MAX_TOOL_CALLS
+                "max_tool_calls", default_tool_calls, MAX_TOOL_CALLS
             ),
             timeout_seconds=bounded(
                 "timeout_seconds", DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS
@@ -159,6 +163,9 @@ class ContextProjection:
     facts: tuple[str, ...] = ()
     constraints: tuple[str, ...] = ()
     artifacts: tuple[str, ...] = ()
+    handoff_evidence: tuple[str, ...] = ()
+    remaining_work: tuple[str, ...] = ()
+    freshness_checks: tuple[str, ...] = ()
     expected_output: str = ""
     evaluation_criteria: tuple[str, ...] = ()
     requested_tools: tuple[str, ...] = ()
@@ -166,7 +173,12 @@ class ContextProjection:
     budget: ExecutionBudget = field(default_factory=ExecutionBudget)
 
     @classmethod
-    def from_input(cls, goal: str, value: Any = None) -> "ContextProjection":
+    def from_input(
+        cls,
+        goal: str,
+        value: Any = None,
+        default_tool_calls: int = DEFAULT_TOOL_CALLS,
+    ) -> "ContextProjection":
         if isinstance(value, cls):
             return replace(value, goal=str(goal).strip())
         payload: Any = value
@@ -198,11 +210,16 @@ class ContextProjection:
             facts=strings("facts"),
             constraints=strings("constraints"),
             artifacts=strings("artifacts"),
+            handoff_evidence=strings("handoff_evidence"),
+            remaining_work=strings("remaining_work"),
+            freshness_checks=strings("freshness_checks"),
             expected_output=str(payload.get("expected_output", "")).strip(),
             evaluation_criteria=strings("evaluation_criteria"),
             requested_tools=strings("requested_tools"),
             scope_id=str(payload.get("scope_id", "default")).strip() or "default",
-            budget=ExecutionBudget.from_input(payload.get("budget")),
+            budget=ExecutionBudget.from_input(
+                payload.get("budget"), default_tool_calls=default_tool_calls
+            ),
         )
 
     def render(
@@ -215,6 +232,9 @@ class ContextProjection:
             ("RELEVANT FACTS", "\n".join(f"- {item}" for item in self.facts)),
             ("CONSTRAINTS", "\n".join(f"- {item}" for item in self.constraints)),
             ("ARTIFACTS / REFERENCES", "\n".join(f"- {item}" for item in self.artifacts)),
+            ("PRIOR EVIDENCE / PROVENANCE", "\n".join(f"- {item}" for item in self.handoff_evidence)),
+            ("REMAINING WORK", "\n".join(f"- {item}" for item in self.remaining_work)),
+            ("REQUIRED FRESHNESS CHECKS", "\n".join(f"- {item}" for item in self.freshness_checks)),
             ("EXPECTED OUTPUT", self.expected_output),
             ("EVALUATION CRITERIA", "\n".join(f"- {item}" for item in self.evaluation_criteria)),
             ("ALLOWED TOOL CATEGORIES", ", ".join(resolved_tools)),
@@ -228,6 +248,9 @@ class ContextProjection:
         body = "\n\n".join(f"{title}\n{text}" for title, text in sections if text)
         return (
             f"{body}\n\n"
+            "Treat prior evidence as a handoff: do not repeat discovery unless a "
+            "listed freshness check requires it. Plan tool calls before acting and "
+            "reserve enough calls to verify the final state. "
             "Return only a JSON object with keys status, summary, findings, "
             "artifacts, evidence, and optional error. Keep it compact. Do not "
             "include your transcript or intermediate reasoning. If the goal is "
@@ -760,7 +783,6 @@ class SubagentRuntime:
         goal = str(task).strip()
         if not goal:
             raise SubagentError("task is empty")
-        projection = ContextProjection.from_input(goal, context)
         previous_response_id = None
         if session_id:
             selection_reason = "resumed_session"
@@ -774,6 +796,15 @@ class SubagentRuntime:
         else:
             selection_reason = "explicit_agent" if agent_id else "capability"
             definition = self.registry.select(capability, goal, agent_id)
+        projection = ContextProjection.from_input(
+            goal,
+            context,
+            default_tool_calls=(
+                DEFAULT_CODING_TOOL_CALLS
+                if definition.id == "coding-agent"
+                else DEFAULT_TOOL_CALLS
+            ),
+        )
         resolved_tools = ToolResolver.resolve(
             definition, projection.requested_tools
         )
@@ -826,6 +857,9 @@ class SubagentRuntime:
                 "facts": list(projection.facts),
                 "constraints": list(projection.constraints),
                 "artifacts": list(projection.artifacts),
+                "handoff_evidence": list(projection.handoff_evidence),
+                "remaining_work": list(projection.remaining_work),
+                "freshness_checks": list(projection.freshness_checks),
                 "expected_output": projection.expected_output,
                 "evaluation_criteria": list(projection.evaluation_criteria),
             },
@@ -1028,6 +1062,39 @@ def inspect_session(session_id: str, store_path: str) -> str:
     }, ensure_ascii=False)
 
 
+def save_report(scope_id: str, report: Any, store_path: str) -> str:
+    """Validate and atomically persist one workflow report beside the store."""
+    try:
+        scope = str(scope_id).strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", scope):
+            raise ValueError("scope_id must be a safe identifier")
+        payload = json.loads(report) if isinstance(report, str) else report
+        if not isinstance(payload, Mapping):
+            raise ValueError("report must be a JSON object")
+        rendered = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        directory = Path(SessionStore(store_path).path).parent / "subagent_reports"
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / f"{scope}.json"
+        temporary = directory / f".{scope}.{uuid4().hex}.tmp"
+        try:
+            with temporary.open("x", encoding="utf-8", newline="\n") as stream:
+                stream.write(rendered)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return json.dumps({
+            "status": "saved",
+            "path": str(target),
+            "sha256": hashlib.sha256(rendered.encode("utf-8")).hexdigest(),
+        }, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({
+            "status": "error", "type": "report_error", "message": str(exc)
+        }, ensure_ascii=False)
+
+
 def dispose_session(session_id: str, purge: Any, store_path: str) -> str:
     """Dispose or purge one session without exposing retained private state."""
     try:
@@ -1103,36 +1170,71 @@ def deliver_completed(store_path: str, history_path: str) -> str:
 
 def _parse_result(prepared: PreparedRun, reply: str) -> SubagentResult:
     candidate = reply.strip()
-    if candidate.startswith("```"):
-        lines = candidate.splitlines()
-        candidate = "\n".join(lines[1:-1]).strip()
-    try:
-        payload = json.loads(candidate)
-    except (TypeError, ValueError):
-        payload = {"status": "completed", "summary": reply}
+    candidates = [candidate]
+    fenced = re.findall(
+        r"```(?:json)?\s*(\{.*?\})\s*```", candidate, flags=re.IGNORECASE | re.DOTALL
+    )
+    if len(fenced) == 1:
+        candidates.append(fenced[0])
+    payload = None
+    for value in candidates:
+        try:
+            loaded = json.loads(value)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(loaded, Mapping):
+            payload = loaded
+            break
     if not isinstance(payload, Mapping):
-        payload = {"status": "completed", "summary": reply}
+        return SubagentResult(
+            agent_id=prepared.definition.id,
+            session_id=prepared.session_id,
+            run_id=prepared.run_id,
+            status="failed",
+            summary="Subagent returned an invalid structured result.",
+            error="invalid_result: worker reply must be one JSON object",
+        )
+
+    invalid_fields = []
 
     def items(name: str) -> tuple[str, ...]:
-        value = payload.get(name, ())
-        if isinstance(value, str):
-            return (value,) if value.strip() else ()
-        return tuple(str(item) for item in value or ())
+        value = payload.get(name)
+        if not isinstance(value, (list, tuple)):
+            if status == "completed":
+                invalid_fields.append(name)
+            return ()
+        return tuple(str(item).strip() for item in value if str(item).strip())
 
-    status = _normalise_status(payload.get("status", "completed"))
+    status = _normalise_status(payload.get("status", ""))
     if status not in RESULT_STATUSES:
+        invalid_fields.append("status")
         status = "failed"
-    summary = str(payload.get("summary") or reply).strip()[:MAX_RESULT_CHARS]
+    summary_value = payload.get("summary")
+    if not isinstance(summary_value, str) or not summary_value.strip():
+        invalid_fields.append("summary")
+    summary = str(
+        summary_value or "Subagent returned an invalid structured result."
+    ).strip()[:MAX_RESULT_CHARS]
     error = str(payload.get("error", "")).strip() or None
+    findings = items("findings")
+    artifacts = items("artifacts")
+    evidence = items("evidence")
+    if status == "completed" and not evidence:
+        invalid_fields.append("evidence(non-empty for completed results)")
+    if invalid_fields:
+        status = "failed"
+        error = "invalid_result: invalid or missing " + ", ".join(
+            sorted(set(invalid_fields))
+        )
     return SubagentResult(
         agent_id=prepared.definition.id,
         session_id=prepared.session_id,
         run_id=prepared.run_id,
         status=status,
         summary=summary,
-        findings=items("findings"),
-        artifacts=items("artifacts"),
-        evidence=items("evidence"),
+        findings=findings,
+        artifacts=artifacts,
+        evidence=evidence,
         error=error,
     )
 

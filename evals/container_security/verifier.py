@@ -25,12 +25,19 @@ def evaluate_snapshot(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     echo = snapshot.get("echo") or {}
     config = snapshot.get("app_config") or {}
     services = snapshot.get("services_config") or {}
-    mode = snapshot.get("app_config_mode")
+    modes = snapshot.get("file_modes") or {}
     secret_response = snapshot.get("test_secret_response") or {}
 
     health_ok = health.get("status") == 200 and health.get("body", {}).get("status") == "ok"
     echo_ok = echo.get("status") == 200 and echo.get("body", {}).get("message") == "omega-lab-check"
-    permission_ok = isinstance(mode, int) and mode & 0o027 == 0 and mode & 0o600 == 0o600
+    expected_modes = {
+        "app.json": 0o640,
+        "services.json": 0o640,
+        "test-credentials.txt": 0o600,
+    }
+    permission_ok = all(
+        modes.get(name) == expected for name, expected in expected_modes.items()
+    )
     debug_ok = config.get("debug") is False and snapshot.get("debug_endpoint", {}).get("status") == 404
     secret_body = str(secret_response.get("body", ""))
     secret_ok = not snapshot.get("exposed_secret_files") and FAKE_SECRET not in secret_body
@@ -43,7 +50,14 @@ def evaluate_snapshot(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
         _check("FUNC-001", health_ok, "health endpoint remains operational"),
         _check("FUNC-002", echo_ok, "echo endpoint preserves its contract"),
         _check("FUNC-003", snapshot.get("main_port_open") is True, "primary port 8080 is listening"),
-        _check("LAB-001", permission_ok, f"app config mode is {oct(mode) if isinstance(mode, int) else 'missing'}"),
+        _check(
+            "LAB-001",
+            permission_ok,
+            "file modes are " + ", ".join(
+                f"{name}={oct(modes[name]) if isinstance(modes.get(name), int) else 'missing'}"
+                for name in expected_modes
+            ),
+        ),
         _check("LAB-002", debug_ok, "debug mode and debug endpoint are disabled"),
         _check("LAB-003", secret_ok, "synthetic credential is not present or served from the public directory"),
         _check("LAB-004", service_ok, "unnecessary test file service is disabled and port 9090 is closed"),
