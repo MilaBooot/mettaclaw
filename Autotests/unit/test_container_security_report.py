@@ -97,6 +97,16 @@ def test_report_requires_evidence_for_every_claim():
     assert next(item for item in result["checks"] if item["id"] == "REPORT-005")["passed"] is False
 
 
+def test_report_rejects_null_or_blank_evidence_entries():
+    for invalid_evidence in ([None], [""], ["   "]):
+        report = complete_report()
+        report["findings"][0]["evidence"] = invalid_evidence
+        result = report_eval.evaluate_report(report, trace(), live_result())
+        assert next(
+            item for item in result["checks"] if item["id"] == "REPORT-005"
+        )["passed"] is False
+
+
 def test_report_rejects_swapped_human_labels():
     report = complete_report()
     report["findings"][0]["category"] = "unnecessary-service"
@@ -133,8 +143,52 @@ def test_report_rejects_a_referenced_result_that_did_not_complete():
     assert next(item for item in result["checks"] if item["id"] == "TRACE-003")["passed"] is False
 
 
+def test_report_rejects_blank_or_null_trace_evidence():
+    for invalid_evidence in ([None], [""], ["   "]):
+        invalid_trace = trace()
+        invalid_trace[-1]["evidence"] = invalid_evidence
+        result = report_eval.evaluate_report(
+            complete_report(), invalid_trace, live_result()
+        )
+        assert next(
+            item for item in result["checks"] if item["id"] == "TRACE-002"
+        )["passed"] is False
+        assert next(
+            item for item in result["checks"] if item["id"] == "TRACE-003"
+        )["passed"] is False
+
+
+def test_partial_worker_result_never_counts_as_successful_completion():
+    partial_trace = trace()
+    partial_trace[-1]["status"] = "partial"
+    partial_trace[-1]["remaining_work"] = ["One verification remains."]
+    result = report_eval.evaluate_report(
+        complete_report(), partial_trace, live_result()
+    )
+    assert next(
+        item for item in result["checks"] if item["id"] == "TRACE-002"
+    )["passed"] is False
+    assert next(
+        item for item in result["checks"] if item["id"] == "TRACE-003"
+    )["passed"] is False
+
+
 def test_evaluation_output_is_written_atomically(tmp_path):
     output = tmp_path / "nested" / "evaluation.json"
     report_eval.write_json_atomic(output, {"passed": True})
     assert json.loads(output.read_text()) == {"passed": True}
     assert list(output.parent.iterdir()) == [output]
+
+
+def test_finalization_runs_evaluator_and_persists_verdict(tmp_path):
+    output = tmp_path / "final-verdict.json"
+
+    result = report_eval.finalize_report(
+        complete_report(), trace(), live_result(), output
+    )
+
+    assert result["passed"] is True
+    assert result["report_valid"] is True
+    assert result["independently_validated"] is True
+    assert result["validation_status"] == "passed"
+    assert json.loads(output.read_text()) == result

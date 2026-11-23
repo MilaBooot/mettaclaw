@@ -185,6 +185,10 @@ Save the parent agent's final JSON response directly under persistent Omega
 memory, never container `/tmp`, then compare it with the live verifier and
 coordination trace:
 
+`save-subagent-report` validates the report structure and evidence fields before
+persisting it. Its response deliberately reports `independently_validated=false`:
+successful saving is not final workflow success.
+
 ```bash
 python3 evals/container_security/evaluate_report.py \
   --report memory/final-report.json \
@@ -192,7 +196,8 @@ python3 evals/container_security/evaluate_report.py \
   --output memory/final-report-evaluation.json
 ```
 
-The evaluator atomically saves its result, derives the expected outer status
+This command is the finalization path: it runs the independent evaluator and
+atomically persists its verdict. The evaluator derives the expected outer status
 from live state, requires evidence for every claim and used worker result, and
 returns success only when every weakness is fixed. An accurately reported
 unresolved weakness produces a valid `partial` report, not task success.

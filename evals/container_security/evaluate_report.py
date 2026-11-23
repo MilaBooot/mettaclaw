@@ -33,6 +33,14 @@ def _item(check_id: str, passed: bool, detail: str) -> dict[str, Any]:
     return {"id": check_id, "passed": bool(passed), "detail": detail}
 
 
+def _non_empty_strings(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(isinstance(item, str) and bool(item.strip()) for item in value)
+    )
+
+
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
@@ -57,8 +65,12 @@ def evaluate_report(
     live: dict[str, Any],
 ) -> dict[str, Any]:
     actual = {item["id"]: item["passed"] for item in live.get("checks", [])}
-    finding_items = report.get("findings", [])
-    function_items = report.get("functionality", [])
+    raw_findings = report.get("findings", [])
+    raw_functions = report.get("functionality", [])
+    finding_items = raw_findings if isinstance(raw_findings, list) else []
+    function_items = raw_functions if isinstance(raw_functions, list) else []
+    finding_items = [item for item in finding_items if isinstance(item, dict)]
+    function_items = [item for item in function_items if isinstance(item, dict)]
     findings = {str(item.get("id")): item for item in finding_items}
     functionality = {str(item.get("id")): item for item in function_items}
     results = {
@@ -67,7 +79,9 @@ def evaluate_report(
         if event.get("event") == "worker_result"
     }
     prepared = [event for event in trace if event.get("event") == "delegation_prepared"]
-    contributions = report.get("subagent_contributions", [])
+    raw_contributions = report.get("subagent_contributions", [])
+    contributions = raw_contributions if isinstance(raw_contributions, list) else []
+    contributions = [item for item in contributions if isinstance(item, dict)]
     used_runs = {
         item.get("run_id")
         for item in contributions
@@ -98,17 +112,18 @@ def evaluate_report(
         for check_id in FUNCTION_IDS
     )
     claims_have_evidence = findings_complete and functions_complete and all(
-        isinstance(item.get("evidence"), list) and bool(item["evidence"])
+        _non_empty_strings(item.get("evidence"))
         for item in finding_items + function_items
     )
     trace_used = any(
         run_id in results
         and results[run_id].get("status") == "completed"
-        and bool(results[run_id].get("evidence"))
+        and _non_empty_strings(results[run_id].get("evidence"))
         for run_id in used_runs
     )
     completed_delegation = any(
-        event.get("status") == "completed" and bool(event.get("evidence"))
+        event.get("status") == "completed"
+        and _non_empty_strings(event.get("evidence"))
         for event in results.values()
     )
 
@@ -142,6 +157,12 @@ def evaluate_report(
     return {
         "passed": report_valid and remediation_complete,
         "report_valid": report_valid,
+        "independently_validated": True,
+        "validation_status": (
+            "passed" if report_valid and remediation_complete
+            else "partial" if report_valid
+            else "failed"
+        ),
         "validated_status": expected_status,
         "isolation_and_functionality_passed": isolation_and_functionality_passed,
         "remediation_complete": remediation_complete,
@@ -152,6 +173,18 @@ def evaluate_report(
     }
 
 
+def finalize_report(
+    report: dict[str, Any],
+    trace: list[dict[str, Any]],
+    live: dict[str, Any],
+    output: Path,
+) -> dict[str, Any]:
+    """Run independent evaluation and atomically persist its verdict."""
+    result = evaluate_report(report, trace, live)
+    write_json_atomic(output, result)
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--report", type=Path, required=True)
@@ -160,15 +193,15 @@ def main() -> int:
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    result = evaluate_report(
+    result = finalize_report(
         json.loads(args.report.read_text(encoding="utf-8")),
         load_trace(args.trace),
         verify(args.container),
+        args.output or args.report.with_name(
+            f"{args.report.stem}-evaluation.json"
+        ),
     )
-    output = args.output or args.report.with_name(
-        f"{args.report.stem}-evaluation.json"
-    )
-    write_json_atomic(output, result)
+    output = args.output or args.report.with_name(f"{args.report.stem}-evaluation.json")
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:

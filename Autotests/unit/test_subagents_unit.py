@@ -64,6 +64,40 @@ def _runtime(sa, tmp_path, executor=None):
     return sa.SubagentRuntime(store, executor), executor
 
 
+def _valid_report():
+    return {
+        "scenario_id": "scenario-1",
+        "target": "authorized-target",
+        "overall_status": "completed",
+        "findings": [{
+            "id": "FINDING-1",
+            "category": "configuration",
+            "target": "config.json",
+            "disposition": "fixed",
+            "summary": "Configuration was corrected.",
+            "evidence": ["Independent check passed."],
+        }],
+        "functionality": [{
+            "id": "FUNC-1",
+            "status": "passed",
+            "evidence": ["Required behavior returned HTTP 200."],
+        }],
+        "subagent_contributions": [{
+            "agent_id": "reviewer-agent",
+            "session_id": "ses-1",
+            "run_id": "run-1",
+            "task": "Verify the final state.",
+            "result_used_by_parent": True,
+            "summary": "Verification passed.",
+        }],
+        "duplicate_work": [],
+        "conflicting_actions": [],
+        "failures": [],
+        "unresolved_risks": [],
+        "limitations": [],
+    }
+
+
 def test_registry_finds_agents_and_selects_by_capability(sa):
     registry = sa.DEFAULT_REGISTRY
     assert registry.get("research-agent").name == "Research Agent"
@@ -192,6 +226,9 @@ def test_store_migrates_existing_session_schema(sa, tmp_path):
     assert session["scope_id"] == "default"
     assert session["disposed_at"] is None
     assert store.list_outbox() == []
+    with sqlite3.connect(path) as db:
+        run_columns = {row[1] for row in db.execute("PRAGMA table_info(subagent_runs)")}
+    assert {"evidence_json", "remaining_work_json"} <= run_columns
 
 
 def test_session_messages_are_isolated(sa, tmp_path):
@@ -284,6 +321,78 @@ def test_executor_failure_returns_clean_result_and_persists_error(sa, tmp_path):
     run = runtime.store.list_runs(result.session_id)[0]
     assert run["status"] == "failed"
     assert run["error"] == "gateway down"
+
+
+@pytest.mark.parametrize("invalid_evidence", [[None], [""], ["   "]])
+def test_completed_result_rejects_null_or_blank_evidence(
+    sa, tmp_path, invalid_evidence
+):
+    reply = {
+        "status": "completed",
+        "summary": "Unsupported completion claim.",
+        "findings": [],
+        "artifacts": [],
+        "evidence": invalid_evidence,
+    }
+    runtime, _ = _runtime(sa, tmp_path, FakeExecutor(reply=reply))
+
+    result = runtime.run_subagent(task="Verify", capability="review")
+
+    assert result.status == "failed"
+    assert result.evidence == ()
+    assert "evidence" in result.error
+
+
+def test_partial_result_preserves_evidence_and_remaining_work(sa, tmp_path):
+    reply = {
+        "status": "partial",
+        "summary": "Two checks passed; one remains.",
+        "findings": ["Configuration was fixed."],
+        "artifacts": [],
+        "evidence": ["Read-back confirmed debug=false."],
+        "remaining_work": ["Independently verify the file mode."],
+    }
+    runtime, _ = _runtime(sa, tmp_path, FakeExecutor(reply=reply))
+
+    result = runtime.run_subagent(task="Remediate", capability="coding")
+
+    assert result.status == "partial"
+    assert result.evidence == ("Read-back confirmed debug=false.",)
+    assert result.remaining_work == ("Independently verify the file mode.",)
+    stored_run = runtime.store.list_runs(result.session_id)[0]
+    assert stored_run["status"] == "partial"
+    assert json.loads(stored_run["evidence_json"]) == list(result.evidence)
+    assert json.loads(stored_run["remaining_work_json"]) == list(result.remaining_work)
+    rendered = sa._render_result(result)
+    assert "status=partial" in rendered
+    assert "remaining_work=Independently verify the file mode." in rendered
+    assert "status=partial" in runtime.store.list_outbox()[0]["payload"]
+
+    inspected = json.loads(sa.inspect_session(result.session_id, runtime.store.path))
+    assert inspected["runs"][0]["status"] == "partial"
+    assert inspected["runs"][0]["evidence"] == list(result.evidence)
+    assert inspected["runs"][0]["remaining_work"] == list(result.remaining_work)
+
+
+@pytest.mark.parametrize("missing_field", ["evidence", "remaining_work"])
+def test_partial_result_requires_evidence_and_remaining_work(
+    sa, tmp_path, missing_field
+):
+    reply = {
+        "status": "partial",
+        "summary": "Work remains.",
+        "findings": [],
+        "artifacts": [],
+        "evidence": ["One check passed."],
+        "remaining_work": ["Run the final check."],
+    }
+    reply[missing_field] = []
+    runtime, _ = _runtime(sa, tmp_path, FakeExecutor(reply=reply))
+
+    result = runtime.run_subagent(task="Review", capability="review")
+
+    assert result.status == "failed"
+    assert missing_field in result.error
 
 
 def test_end_to_end_selection_projection_persistence_and_result(sa, tmp_path):
@@ -444,17 +553,42 @@ def test_inspect_unknown_session_returns_clean_error(sa, tmp_path):
 def test_report_is_validated_and_atomically_saved_beside_store(sa, tmp_path):
     store_path = tmp_path / "memory" / "subagents.sqlite3"
     saved = json.loads(sa.save_report(
-        "workflow-1", {"overall_status": "completed"}, str(store_path)
+        "workflow-1", _valid_report(), str(store_path)
     ))
     target = tmp_path / "memory" / "subagent_reports" / "workflow-1.json"
     assert saved["status"] == "saved"
-    assert json.loads(target.read_text()) == {"overall_status": "completed"}
+    assert json.loads(target.read_text()) == _valid_report()
     assert len(saved["sha256"]) == 64
+    assert saved["schema_valid"] is True
+    assert saved["independently_validated"] is False
+    assert saved["validation_status"] == "not_run"
     assert not list(target.parent.glob("*.tmp"))
 
     rejected = json.loads(sa.save_report("../escape", {}, str(store_path)))
     assert rejected["status"] == "error"
     assert rejected["type"] == "report_error"
+
+
+@pytest.mark.parametrize("invalid_evidence", [[None], [""], ["   "]])
+def test_report_rejects_null_or_blank_evidence(sa, tmp_path, invalid_evidence):
+    report = _valid_report()
+    report["findings"][0]["evidence"] = invalid_evidence
+
+    rejected = json.loads(sa.save_report(
+        "workflow-1", report, str(tmp_path / "subagents.sqlite3")
+    ))
+
+    assert rejected["status"] == "error"
+    assert "evidence" in rejected["message"]
+
+
+def test_report_rejects_empty_json_object(sa, tmp_path):
+    rejected = json.loads(sa.save_report(
+        "workflow-1", {}, str(tmp_path / "subagents.sqlite3")
+    ))
+
+    assert rejected["status"] == "error"
+    assert "schema validation failed" in rejected["message"]
 
 
 def test_resolved_tool_subset_reaches_executor_and_prompt(sa, tmp_path):
