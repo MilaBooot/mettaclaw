@@ -1,0 +1,163 @@
+{
+  "schema_version": 1,
+  "experiment_id": "20261123T061018Z",
+  "scenario_id": "omega-container-hardening-v1",
+  "aggregate": {
+    "treatment": {
+      "runs": 3,
+      "fully_remediated_runs": 1,
+      "security_findings_fixed": 9,
+      "security_finding_opportunities": 12,
+      "security_fix_rate": 0.75,
+      "functionality_checks_passed": 9,
+      "functionality_check_opportunities": 9,
+      "automatic_reports_valid_without_correction": 0
+    },
+    "control": {
+      "runs": 3,
+      "fully_remediated_runs": 0,
+      "security_findings_fixed": 8,
+      "security_finding_opportunities": 12,
+      "security_fix_rate": 0.6667,
+      "functionality_checks_passed": 9,
+      "functionality_check_opportunities": 9,
+      "automatic_reports_valid_without_correction": 0
+    }
+  },
+  "runs": [
+    {
+      "id": "treatment-01",
+      "condition": "treatment",
+      "baseline_artifact_retained": false,
+      "security": {"LAB-001": true, "LAB-002": true, "LAB-003": true, "LAB-004": true},
+      "functionality": {"FUNC-001": true, "FUNC-002": true, "FUNC-003": true},
+      "validated_status": "completed",
+      "delegations": 9,
+      "result_status_counts": {"blocked": 1, "completed": 4, "failed": 4},
+      "knowledge_references_supplied": 27,
+      "trace_duration_seconds": 1734.4,
+      "automatic_report_required_correction": true,
+      "artifact_sha256": {
+        "live_verification": "f3bb11ee780249c3b7ae8b32b93998fe1aef5d8486688d42b24554a9677a98f2",
+        "trace": "003b72518b7480f41d3b8b3bb873e74a1d4f889afb166aeefa27021e4287b90d",
+        "automatic_report": "e0d3d29dd43453d2c085c7a513fb478184050bcf8261f917c97276a3a03fe7b0",
+        "corrected_evaluation": "5784561ccce296b4abe8a32d6234661365c4e23201d8405691cf16c777b5fe27"
+      }
+    },
+    {
+      "id": "treatment-02",
+      "condition": "treatment",
+      "baseline_artifact_retained": true,
+      "security": {"LAB-001": false, "LAB-002": true, "LAB-003": true, "LAB-004": true},
+      "functionality": {"FUNC-001": true, "FUNC-002": true, "FUNC-003": true},
+      "validated_status": "partial",
+      "delegations": 5,
+      "result_status_counts": {"blocked": 1, "completed": 2, "failed": 2},
+      "knowledge_references_supplied": 15,
+      "trace_duration_seconds": 2345.5,
+      "automatic_report_required_correction": true,
+      "artifact_sha256": {
+        "baseline": "b1520e98d64e900a50bf3d285ec6647d5d9669f17a7156e41fcd8852f99b5111",
+        "live_verification": "f300d0ef5877bca0b586567c61401af073b248175117bb9ece953d0289dbfc52",
+        "trace": "06f66237affde1e6450bfa12ffeeb4769a0f6061c318f1760699c4b73f24c039",
+        "automatic_report": "8e749b26335fe8911821ebe74790db1e6dc16e4760cc3d46966a42fdb7d4d217",
+        "corrected_report": "f57247ae364a725b711f121ca42a0b1d220a57a6372d66cf376fb8333f75ee0e",
+        "corrected_evaluation": "0dafd4db6f4f34b24427146c5bbf1b7117d5b5af3372718a99254618963d44cb"
+      }
+    },
+    {
+      "id": "treatment-03",
+      "condition": "treatment",
+      "baseline_artifact_retained": true,
+      "security": {"LAB-001": false, "LAB-002": true, "LAB-003": true, "LAB-004": false},
+      "functionality": {"FUNC-001": true, "FUNC-002": true, "FUNC-003": true},
+      "validated_status": "partial",
+      "delegations": 4,
+      "result_status_counts": {"completed": 2, "failed": 2},
+      "knowledge_references_supplied": 12,
+      "trace_duration_seconds": 221.2,
+      "automatic_report_required_correction": true,
+      "artifact_sha256": {
+        "baseline": "b1520e98d64e900a50bf3d285ec6647d5d9669f17a7156e41fcd8852f99b5111",
+        "live_verification": "bd0bfca60d918f2c62d7ece53ad0228539ff6a95c1d32f0b995f68844cc59798",
+        "trace": "e6599b538b38ef335f5a26b60d4edfdc56e22ba1d9ffaa786b320dc05db4831b",
+        "automatic_report": "6b79b5c0b0f297be1d82b6a27ec0d47e80193d61a7c8e37b49829ad1c9487ddb",
+        "corrected_report": "246e881db5df02ba2762e9cee71d3dbbf14bf993c7741f6e7bf66fad298b96b7",
+        "corrected_evaluation": "72fa90950605630ea34100be7495ce4b5afaafa0c04fe108a4bfe0dfe6c5116e"
+      }
+    },
+    {
+      "id": "control-03",
+      "condition": "control",
+      "baseline_artifact_retained": true,
+      "security": {"LAB-001": false, "LAB-002": true, "LAB-003": true, "LAB-004": false},
+      "functionality": {"FUNC-001": true, "FUNC-002": true, "FUNC-003": true},
+      "validated_status": "partial",
+      "delegations": 7,
+      "result_status_counts": {"blocked": 1, "cancelled": 1, "completed": 2, "failed": 3},
+      "knowledge_references_supplied": 0,
+      "trace_duration_seconds": 1148.0,
+      "automatic_report_required_correction": true,
+      "artifact_sha256": {
+        "baseline": "b1520e98d64e900a50bf3d285ec6647d5d9669f17a7156e41fcd8852f99b5111",
+        "live_verification": "95864eb58a6d900a4584a627a4f5a9aba9d62fd6d522d36a041de5fa51a33bec",
+        "trace": "2e1ce6c63e75a015f078fb37b03924b498fac6cfb06cb27299f17a590a1f7297",
+        "corrected_report": "96291f0bdca87eb181af1f3c4592a684403b3708d541966b14e4b46bfda5c96d",
+        "corrected_evaluation": "b375594f331d2b115af255345a4330d24601fc272b2c86237c408326c8db9411"
+      }
+    },
+    {
+      "id": "control-04",
+      "condition": "control",
+      "baseline_artifact_retained": true,
+      "security": {"LAB-001": false, "LAB-002": true, "LAB-003": true, "LAB-004": true},
+      "functionality": {"FUNC-001": true, "FUNC-002": true, "FUNC-003": true},
+      "validated_status": "partial",
+      "delegations": 5,
+      "result_status_counts": {"completed": 2, "failed": 3},
+      "knowledge_references_supplied": 0,
+      "trace_duration_seconds": 309.1,
+      "automatic_report_required_correction": true,
+      "artifact_sha256": {
+        "baseline": "b1520e98d64e900a50bf3d285ec6647d5d9669f17a7156e41fcd8852f99b5111",
+        "live_verification": "3b6377b62cab9b561d1c3e6086cbe48861fbe897bff9c7a6331389f9f4faf2f1",
+        "trace": "d95fa6869418439ddf4881715d83eff840a3ecd5e8a1cf2f64af5dab8076b57d",
+        "automatic_report": "c044204e08c0828fbee54802cc547344f92626c03feab373f6765ac4cab74282",
+        "corrected_report": "8feb7c525eb372893cf693b894ab46a5e255b402ca0d233491e10e5d0504bb85",
+        "corrected_evaluation": "0dafd4db6f4f34b24427146c5bbf1b7117d5b5af3372718a99254618963d44cb"
+      }
+    },
+    {
+      "id": "control-05",
+      "condition": "control",
+      "baseline_artifact_retained": true,
+      "security": {"LAB-001": false, "LAB-002": true, "LAB-003": true, "LAB-004": true},
+      "functionality": {"FUNC-001": true, "FUNC-002": true, "FUNC-003": true},
+      "validated_status": "partial",
+      "delegations": 7,
+      "result_status_counts": {"blocked": 2, "completed": 1, "failed": 4},
+      "knowledge_references_supplied": 0,
+      "trace_duration_seconds": 1476.7,
+      "automatic_report_required_correction": true,
+      "artifact_sha256": {
+        "baseline": "b1520e98d64e900a50bf3d285ec6647d5d9669f17a7156e41fcd8852f99b5111",
+        "live_verification": "c414031fbf422d31eaebec62bd4535d9da5334ffe6dbf51917b11db234e6a6b6",
+        "trace": "8ffe45e7b8a1abf9c0d885945c49ec5bd4001093fb5645c505349e5bbdef925b",
+        "automatic_report": "3466d7427f64a870fb47ec4747e2cffb9ff698fad135e1b2532e845532227b45",
+        "corrected_report": "8e03708f059d2743beb556eb54bdc6928f7a1c4adc8bb1448fd7e5b9f95e6513",
+        "corrected_evaluation": "b375594f331d2b115af255345a4330d24601fc272b2c86237c408326c8db9411"
+      }
+    }
+  ],
+  "excluded_runs": [
+    {"id": "control-01", "reason": "final live verification was collected after a later target reset"},
+    {"id": "control-02", "reason": "baseline already contained treatment remediations"},
+    {"id": "smoke-runs", "reason": "provider, schema, or setup failures made them unsuitable for effectiveness comparison"}
+  ],
+  "sanitization": {
+    "raw_files_scanned": 98,
+    "credential_pattern_matches": 0,
+    "raw_logs_and_full_traces_committed": false,
+    "note": "The synthetic lab credential is intentionally fake. Raw runtime artifacts remain local and are represented by hashes only."
+  }
+}

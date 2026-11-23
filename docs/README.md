@@ -37,6 +37,9 @@ Numbered in suggested reading order. Each tutorial is self-contained.
 
 ## MVP validation
 
+- [container-security-subagent-evaluation-results.md](./container-security-subagent-evaluation-results.md) - Initial isolated container-hardening evaluation and coordination findings
+- [cybersecurity-knowledge-ab-evaluation-results.md](./cybersecurity-knowledge-ab-evaluation-results.md) - Three-run control/treatment comparison for bounded cybersecurity knowledge delivery
+
 - [persistent-subagent-mvp-validation-report.md](./persistent-subagent-mvp-validation-report.md) — Live Telegram/OpenRouter/OpenClaw results, evidence checklist, MVP boundaries, and the native Omega backend roadmap
 
 ## Reference
