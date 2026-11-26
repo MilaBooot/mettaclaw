@@ -37,6 +37,8 @@ Numbered in suggested reading order. Each tutorial is self-contained.
 
 ## MVP validation
 
+- [proposal-persistent-subagent-architecture.md](./proposal-persistent-subagent-architecture.md) — Backend-neutral architecture proposal, abstract contracts, shared execution decision boundary, and native-worker integration path
+
 - [persistent-subagent-mvp-validation-report.md](./persistent-subagent-mvp-validation-report.md) — Live Telegram/OpenRouter/OpenClaw results, evidence checklist, MVP boundaries, and the native Omega backend roadmap
 
 ## Reference

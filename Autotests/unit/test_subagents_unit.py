@@ -10,6 +10,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from execution_decision import ExecutionPlanSelector, ModelRoute
+
 
 _REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
 _PLUGIN_DIR = os.path.join(_REPO_ROOT, "plugins", "openclaw")
@@ -107,6 +109,39 @@ def test_registry_finds_agents_and_selects_by_capability(sa):
     assert "omega_lab_read" in registry.get("research-agent").allowed_tools
     assert "omega_lab_write" in registry.get("coding-agent").allowed_tools
     assert "omega_lab_verify" in registry.get("reviewer-agent").allowed_tools
+
+
+def test_runtime_uses_shared_worker_and_model_execution_plan(sa, tmp_path):
+    trace_path = tmp_path / "coordination.jsonl"
+    selector = ExecutionPlanSelector(
+        worker_selector=lambda request: sa.DEFAULT_REGISTRY.select(
+            request.capability, request.task, request.explicit_worker_id
+        ).id,
+        model_selector=lambda request: ModelRoute(
+            "Provider-A", "research-model", "complexity-policy"
+        ),
+    )
+    runtime = sa.SubagentRuntime(
+        sa.SessionStore(tmp_path / "subagents.sqlite3"),
+        FakeExecutor(),
+        trace_path=trace_path,
+        decision_selector=selector,
+    )
+
+    prepared = runtime.prepare(
+        task="Research one bounded topic",
+        capability="research",
+        model_request={"requirements": {"complexity": "high"}},
+    )
+
+    assert prepared.definition.id == "research-agent"
+    assert prepared.execution_plan.worker_id == "research-agent"
+    assert prepared.execution_plan.model_route.model_id == "research-model"
+    event = json.loads(trace_path.read_text().splitlines()[0])
+    assert event["execution_plan"]["model_request"]["requirements"] == {
+        "complexity": "high"
+    }
+    assert event["execution_plan"]["model_route"]["provider_id"] == "Provider-A"
 
 
 def test_explicit_agent_overrides_selection_and_unknown_capability_fails(sa):
@@ -254,6 +289,17 @@ def test_resume_cannot_change_session_owner(sa, tmp_path):
         runtime.prepare(
             task="Now code", session_id=first.session_id, agent_id="coding-agent"
         )
+
+
+def test_execution_policy_cannot_change_owner_when_resuming(sa, tmp_path):
+    runtime, _ = _runtime(sa, tmp_path)
+    first = runtime.run_subagent(task="Research", capability="research")
+    runtime.decision_selector = ExecutionPlanSelector(
+        worker_selector=lambda request: "coding-agent"
+    )
+
+    with pytest.raises(sa.SessionError, match="cannot change owner"):
+        runtime.prepare(task="Continue research", session_id=first.session_id)
 
 
 def test_tool_allowlist_accepts_allowed_and_rejects_disallowed(sa):

@@ -21,6 +21,15 @@ import threading
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 from uuid import uuid4
 
+from execution_decision import (
+    ExecutionDecisionError,
+    ExecutionPlan,
+    ExecutionPlanSelector,
+    ExecutionRequest,
+    ModelRoutingRequest,
+    WorkerSelectionRequest,
+)
+
 
 logger = logging.getLogger(__name__)
 MAX_IN_FLIGHT = 5
@@ -745,6 +754,7 @@ class PreparedRun:
     previous_response_id: str | None
     resolved_tools: tuple[str, ...]
     budget: ExecutionBudget
+    execution_plan: ExecutionPlan
 
 
 class OpenClawExecutor:
@@ -783,10 +793,14 @@ class SubagentRuntime:
         executor: Callable[[PreparedRun], Mapping[str, Any]],
         registry: SubagentRegistry = DEFAULT_REGISTRY,
         trace_path: str | os.PathLike[str] | None = None,
+        decision_selector: ExecutionPlanSelector | None = None,
     ):
         self.store = store
         self.executor = executor
         self.registry = registry
+        self.decision_selector = decision_selector or ExecutionPlanSelector(
+            worker_selector=self._select_worker
+        )
         self.trace = CoordinationTrace(
             trace_path
             if trace_path is not None
@@ -800,11 +814,13 @@ class SubagentRuntime:
         capability: str | None = None,
         session_id: str | None = None,
         agent_id: str | None = None,
+        model_request: Any = None,
     ) -> PreparedRun:
         goal = str(task).strip()
         if not goal:
             raise SubagentError("task is empty")
         previous_response_id = None
+        routing_request = ModelRoutingRequest.from_input(model_request)
         if session_id:
             selection_reason = "resumed_session"
             session = self.store.get_session(session_id)
@@ -814,9 +830,26 @@ class SubagentRuntime:
                     f"session {session_id} belongs to {definition.id}, not {agent_id}"
                 )
             previous_response_id = session["backend_response_id"]
+            requested_agent_id = definition.id
         else:
             selection_reason = "explicit_agent" if agent_id else "capability"
-            definition = self.registry.select(capability, goal, agent_id)
+            requested_agent_id = agent_id
+        try:
+            execution_plan = self.decision_selector.select(ExecutionRequest(
+                task=goal,
+                capability=capability,
+                explicit_worker_id=requested_agent_id,
+                model_request=routing_request,
+            ))
+        except ExecutionDecisionError as exc:
+            raise SubagentError(str(exc)) from exc
+        if execution_plan.mode != "subagent" or not execution_plan.worker_id:
+            raise SubagentError("delegation did not produce a subagent execution plan")
+        if session_id and execution_plan.worker_id != session["agent_id"]:
+            raise SessionError(
+                f"execution decision cannot change owner of session {session_id}"
+            )
+        definition = self.registry.get(execution_plan.worker_id)
         projection = ContextProjection.from_input(
             goal,
             context,
@@ -857,6 +890,7 @@ class SubagentRuntime:
             previous_response_id,
             resolved_tools,
             projection.budget,
+            execution_plan,
         )
         context_bytes = projection.context.encode("utf-8")
         self.trace.emit(
@@ -870,6 +904,16 @@ class SubagentRuntime:
                 "requested_capability": str(capability or ""),
                 "explicit_agent_id": str(agent_id or ""),
                 "resumed": previous_response_id is not None,
+            },
+            execution_plan={
+                "mode": execution_plan.mode,
+                "reason": execution_plan.reason,
+                "worker_id": execution_plan.worker_id,
+                "model_request": execution_plan.model_request.to_dict(),
+                "model_route": (
+                    asdict(execution_plan.model_route)
+                    if execution_plan.model_route else None
+                ),
             },
             context_projection={
                 "scope_id": projection.scope_id,
@@ -891,6 +935,13 @@ class SubagentRuntime:
             budget=asdict(projection.budget),
         )
         return prepared
+
+    def _select_worker(self, request: WorkerSelectionRequest) -> str:
+        return self.registry.select(
+            request.capability,
+            request.task,
+            request.explicit_worker_id,
+        ).id
 
     def execute(self, prepared: PreparedRun) -> SubagentResult:
         self.trace.emit(
